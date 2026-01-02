@@ -8,7 +8,7 @@ import { format } from 'date-fns';
 import { 
   Search, Filter, Download, Upload, Plus, Edit, Trash2, 
   Phone, Mail, Building, Calendar, User, ChevronDown, 
-  ChevronUp, CheckCircle, XCircle, AlertCircle, 
+  ChevronUp, CheckCircle, XCircle, AlertCircle, UserPlus,
   MoreVertical, Eye, RefreshCw, BarChart3, Users, TrendingUp
 } from 'lucide-react';
 import toast, { Toaster } from 'react-hot-toast';
@@ -428,6 +428,95 @@ export default function LeadManagementSystem() {
     }
   };
 
+  // =============== STATUS UPDATE FUNCTIONS ===============
+  
+  // Mark as Contacted
+  const markAsContacted = async (leadId: string): Promise<void> => {
+    try {
+      const { error } = await supabase
+        .from('leads')
+        .update({
+          status: 'contacted',
+          last_contact_date: new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', leadId);
+
+      if (error) throw error;
+      
+      toast.success('Lead marked as contacted');
+      fetchLeads();
+      fetchStats();
+    } catch (error: any) {
+      toast.error('Error updating lead status');
+    }
+  };
+
+  // Mark as Converted
+  const markAsConverted = async (leadId: string): Promise<void> => {
+    try {
+      const { error } = await supabase
+        .from('leads')
+        .update({
+          status: 'converted',
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', leadId);
+
+      if (error) throw error;
+      
+      toast.success('Lead marked as converted! 🎉');
+      fetchLeads();
+      fetchStats();
+    } catch (error: any) {
+      toast.error('Error updating lead status');
+    }
+  };
+
+  // Mark as New
+  const markAsNew = async (leadId: string): Promise<void> => {
+    try {
+      const { error } = await supabase
+        .from('leads')
+        .update({
+          status: 'new',
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', leadId);
+
+      if (error) throw error;
+      
+      toast.success('Lead marked as new');
+      fetchLeads();
+      fetchStats();
+    } catch (error: any) {
+      toast.error('Error updating lead status');
+    }
+  };
+
+  // Update follow-up with custom date
+  const updateFollowUp = async (leadId: string, notes: string, nextDate: string): Promise<void> => {
+    try {
+      const { error } = await supabase
+        .from('leads')
+        .update({
+          last_contact_date: new Date().toISOString(),
+          next_follow_up_date: nextDate,
+          follow_up_notes: notes,
+          status: 'contacted',
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', leadId);
+
+      if (error) throw error;
+      
+      toast.success('Follow-up updated');
+      fetchLeads();
+    } catch (error: any) {
+      toast.error('Error updating follow-up');
+    }
+  };
+
   // Export to CSV
   const exportToCSV = (): void => {
     const csvData = filteredLeads.map(lead => ({
@@ -537,29 +626,6 @@ export default function LeadManagementSystem() {
       fetchStats();
     } catch (error: any) {
       toast.error('Error deleting leads');
-    }
-  };
-
-  // Update follow-up
-  const updateFollowUp = async (leadId: string, notes: string, nextDate: string): Promise<void> => {
-    try {
-      const { error } = await supabase
-        .from('leads')
-        .update({
-          last_contact_date: new Date().toISOString(),
-          next_follow_up_date: nextDate,
-          follow_up_notes: notes,
-          status: 'contacted',
-          updated_at: new Date().toISOString()
-        })
-        .eq('id', leadId);
-
-      if (error) throw error;
-      
-      toast.success('Follow-up updated');
-      fetchLeads();
-    } catch (error: any) {
-      toast.error('Error updating follow-up');
     }
   };
 
@@ -1009,27 +1075,57 @@ export default function LeadManagementSystem() {
                           )}
                         </td>
                         <td className="px-6 py-4">
-                          <div className="flex space-x-2">
+                          <div className="flex flex-wrap gap-2">
+                            {/* Status Change Buttons */}
+                            {lead.status !== 'contacted' && (
+                              <button
+                                onClick={() => markAsContacted(lead.id)}
+                                className="p-1.5 bg-yellow-100 text-yellow-800 rounded hover:bg-yellow-200 flex items-center"
+                                title="Mark as Contacted"
+                              >
+                                <Phone className="w-3.5 h-3.5 mr-1" />
+                                <span className="text-xs">Contacted</span>
+                              </button>
+                            )}
+                            
+                            {lead.status !== 'converted' && (
+                              <button
+                                onClick={() => markAsConverted(lead.id)}
+                                className="p-1.5 bg-green-100 text-green-800 rounded hover:bg-green-200 flex items-center"
+                                title="Mark as Converted"
+                              >
+                                <CheckCircle className="w-3.5 h-3.5 mr-1" />
+                                <span className="text-xs">Converted</span>
+                              </button>
+                            )}
+                            
+                            {lead.status !== 'new' && (
+                              <button
+                                onClick={() => markAsNew(lead.id)}
+                                className="p-1.5 bg-blue-100 text-blue-800 rounded hover:bg-blue-200 flex items-center"
+                                title="Mark as New"
+                              >
+                                <UserPlus className="w-3.5 h-3.5 mr-1" />
+                                <span className="text-xs">New</span>
+                              </button>
+                            )}
+                            
+                            {/* Edit Button */}
                             <button
                               onClick={() => handleEdit(lead)}
-                              className="p-1 text-blue-600 hover:bg-blue-50 rounded"
+                              className="p-1.5 text-blue-600 hover:bg-blue-50 rounded"
                               title="Edit"
                             >
-                              <Edit className="w-4 h-4" />
+                              <Edit className="w-3.5 h-3.5" />
                             </button>
-                            <button
-                              onClick={() => updateFollowUp(lead.id, 'Called today', new Date(Date.now() + 86400000).toISOString())}
-                              className="p-1 text-green-600 hover:bg-green-50 rounded"
-                              title="Mark contacted"
-                            >
-                              <Phone className="w-4 h-4" />
-                            </button>
+                            
+                            {/* Delete Button */}
                             <button
                               onClick={() => handleDelete(lead.id)}
-                              className="p-1 text-red-600 hover:bg-red-50 rounded"
+                              className="p-1.5 text-red-600 hover:bg-red-50 rounded"
                               title="Delete"
                             >
-                              <Trash2 className="w-4 h-4" />
+                              <Trash2 className="w-3.5 h-3.5" />
                             </button>
                           </div>
                         </td>
@@ -1082,6 +1178,39 @@ export default function LeadManagementSystem() {
               )}
             </>
           )}
+        </div>
+      </div>
+
+      {/* Status Legend */}
+      <div className="px-6 py-4">
+        <div className="bg-white rounded-xl shadow p-4">
+          <h3 className="text-sm font-medium mb-3">Status Legend</h3>
+          <div className="flex flex-wrap gap-3">
+            <div className="flex items-center">
+              <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800 mr-2">
+                New
+              </span>
+              <span className="text-xs text-gray-600">Recently added lead</span>
+            </div>
+            <div className="flex items-center">
+              <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800 mr-2">
+                Contacted
+              </span>
+              <span className="text-xs text-gray-600">Initial contact made</span>
+            </div>
+            <div className="flex items-center">
+              <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-800 mr-2">
+                Qualified
+              </span>
+              <span className="text-xs text-gray-600">Lead is interested</span>
+            </div>
+            <div className="flex items-center">
+              <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 mr-2">
+                Converted
+              </span>
+              <span className="text-xs text-gray-600">Became a customer</span>
+            </div>
+          </div>
         </div>
       </div>
 
