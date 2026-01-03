@@ -1,13 +1,22 @@
+
 'use client';
 
 import { createClient } from '@supabase/supabase-js';
 import { useEffect, useState } from 'react';
 import html2canvas from 'html2canvas';
 import jsPDF from 'jspdf';
+import Image from 'next/image';
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+  {
+    realtime: {
+      params: {
+        eventsPerSecond: 10
+      }
+    }
+  }
 );
 
 interface Lead {
@@ -19,10 +28,12 @@ interface Lead {
   job_title?: string;
   location?: string;
   source?: string;
-  status: 'New' | 'Open' | 'Important'; 
-  is_active?: boolean;
+  status: 'new' | 'open' | 'important';
+  is_active: boolean;
   industry?: string;
   created_at: string;
+  updated_at?: string;
+  user_id: string;
 }
 
 interface FollowUp {
@@ -34,6 +45,7 @@ interface FollowUp {
   created_at: string;
   completed_at?: string;
   leads?: { full_name: string; email: string };
+  user_id: string;
 }
 
 interface Task {
@@ -43,6 +55,7 @@ interface Task {
   due_date: string;
   completed: boolean;
   created_at: string;
+  user_id: string;
 }
 
 interface Toast {
@@ -52,6 +65,13 @@ interface Toast {
 
 interface LeadWithFollowUps extends Lead {
   follow_ups: FollowUp[];
+}
+
+interface User {
+  id: string;
+  email: string;
+  full_name?: string;
+  avatar_url?: string;
 }
 
 export default function LeadManagement() {
@@ -72,6 +92,8 @@ export default function LeadManagement() {
   const [sourceFilter, setSourceFilter] = useState('All');
   const [sortBy, setSortBy] = useState('newest');
   const [toast, setToast] = useState<Toast | null>(null);
+  const [user, setUser] = useState<User | null>(null);
+  const [loading, setLoading] = useState(true);
 
   const [leadForm, setLeadForm] = useState({
     full_name: '',
@@ -81,8 +103,7 @@ export default function LeadManagement() {
     job_title: '',
     location: '',
     source: 'Website',
-    status: 'New',
-    is_active: true,
+    status: 'new' as 'new' | 'open' | 'important',
     industry: ''
   });
 
@@ -99,9 +120,7 @@ export default function LeadManagement() {
   });
 
   useEffect(() => {
-    fetchLeads();
-    fetchFollowUps();
-    fetchTasks();
+    initializeAuth();
   }, []);
 
   useEffect(() => {
@@ -111,62 +130,340 @@ export default function LeadManagement() {
     }
   }, [toast]);
 
+  useEffect(() => {
+    if (user) {
+      fetchLeads();
+      fetchFollowUps();
+      fetchTasks();
+      setupRealtimeSubscriptions();
+    }
+  }, [user]);
+
+  const initializeAuth = async () => {
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      
+      if (session?.user) {
+        await handleUserSession(session.user);
+      }
+      
+      const { data: authListener } = supabase.auth.onAuthStateChange(
+        async (event, session) => {
+          if (session?.user) {
+            await handleUserSession(session.user);
+          } else {
+            setUser(null);
+            setLeads([]);
+            setFollowUps([]);
+            setTasks([]);
+          }
+          setLoading(false);
+        }
+      );
+
+      setLoading(false);
+      return () => {
+        authListener.subscription.unsubscribe();
+      };
+    } catch (error) {
+      console.error('Auth initialization error:', error);
+      setLoading(false);
+    }
+  };
+
+  const handleUserSession = async (authUser: any) => {
+    try {
+      const { data: userData, error: userError } = await supabase
+        .from('profiles')
+        .select('*')
+        .eq('id', authUser.id)
+        .single();
+      
+      if (userError && userError.code === 'PGRST116') {
+        const { data: newProfile } = await supabase
+          .from('profiles')
+          .insert([
+            {
+              id: authUser.id,
+              full_name: authUser.user_metadata.full_name || authUser.email?.split('@')[0],
+              avatar_url: authUser.user_metadata.avatar_url
+            }
+          ])
+          .select()
+          .single();
+        
+        setUser({
+          id: authUser.id,
+          email: authUser.email!,
+          full_name: newProfile?.full_name || authUser.email?.split('@')[0],
+          avatar_url: newProfile?.avatar_url
+        });
+      } else {
+        setUser({
+          id: authUser.id,
+          email: authUser.email!,
+          full_name: userData?.full_name || authUser.user_metadata.full_name || authUser.email?.split('@')[0],
+          avatar_url: userData?.avatar_url || authUser.user_metadata.avatar_url
+        });
+      }
+    } catch (error) {
+      console.error('Handle user session error:', error);
+    }
+  };
+
+  const setupRealtimeSubscriptions = () => {
+    if (!user) return;
+
+    const leadsChannel = supabase
+      .channel('leads-changes')
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'leads',
+          filter: `user_id=eq.${user.id}`
+        },
+        () => {
+          fetchLeads();
+        }
+      )
+      .subscribe();
+
+    const followUpsChannel = supabase
+      .channel('followups-changes')
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'follow_ups',
+          filter: `user_id=eq.${user.id}`
+        },
+        () => {
+          fetchFollowUps();
+        }
+      )
+      .subscribe();
+
+    const tasksChannel = supabase
+      .channel('tasks-changes')
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'tasks',
+          filter: `user_id=eq.${user.id}`
+        },
+        () => {
+          fetchTasks();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(leadsChannel);
+      supabase.removeChannel(followUpsChannel);
+      supabase.removeChannel(tasksChannel);
+    };
+  };
+
+  const signInWithGoogle = async () => {
+    const { error } = await supabase.auth.signInWithOAuth({
+      provider: 'google',
+      options: {
+        redirectTo: `${window.location.origin}`,
+        queryParams: {
+          access_type: 'offline',
+          prompt: 'consent'
+        }
+      }
+    });
+    
+    if (error) {
+      showToast('Failed to sign in with Google', 'error');
+    }
+  };
+
+  const signOut = async () => {
+    const { error } = await supabase.auth.signOut();
+    if (error) {
+      showToast('Failed to sign out', 'error');
+    } else {
+      showToast('Signed out successfully', 'success');
+    }
+  };
+
   const showToast = (message: string, type: 'success' | 'error' | 'info') => {
     setToast({ message, type });
   };
 
   const fetchLeads = async () => {
-    const { data, error } = await supabase
-      .from('leads')
-      .select('*')
-      .order('created_at', { ascending: false });
-    if (!error && data) setLeads(data);
-  };
-
-  const fetchFollowUps = async () => {
-    const { data: followUpsData, error: followUpsError } = await supabase
-      .from('follow_ups')
-      .select('*, leads!inner(full_name, email)')
-      .eq('completed', false)
-      .order('follow_up_date', { ascending: true }); // Changed to ascending for nearest date first
-
-    if (!followUpsError && followUpsData) {
-      setFollowUps(followUpsData);
-
-      // Group follow-ups by lead
-      const leadsWithFollowUpsData: LeadWithFollowUps[] = [];
+    if (!user) return;
+    
+    try {
+      const { data, error } = await supabase
+        .from('leads')
+        .select('*')
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: false });
       
-      // Get all unique leads from follow-ups
-      const uniqueLeadIds = Array.from(new Set(followUpsData.map(f => f.lead_id)));
-      
-      for (const leadId of uniqueLeadIds) {
-        const leadData = await supabase
-          .from('leads')
-          .select('*')
-          .eq('id', leadId)
-          .single();
-        
-        if (leadData.data) {
-          const leadFollowUps = followUpsData.filter(f => f.lead_id === leadId);
-          leadsWithFollowUpsData.push({
-            ...leadData.data,
-            follow_ups: leadFollowUps.sort((a, b) => 
-              new Date(a.follow_up_date).getTime() - new Date(b.follow_up_date).getTime()
-            )
-          });
-        }
+      if (error) {
+        console.error('Fetch leads error:', error);
+        showToast('Failed to fetch leads', 'error');
+        return;
       }
       
-      setLeadsWithFollowUps(leadsWithFollowUpsData);
+      if (data) {
+        const formattedData = data.map(lead => ({
+          ...lead,
+          is_active: lead.is_active === true
+        }));
+        setLeads(formattedData);
+      } else {
+        setLeads([]);
+      }
+      
+    } catch (error) {
+      console.error('Fetch leads exception:', error);
+      showToast('Error fetching leads', 'error');
     }
   };
 
+ const fetchFollowUps = async () => {
+  if (!user) return;
+
+  try {
+    // First, fetch all follow-ups for this user
+    const { data: followUpsData, error: followUpsError } = await supabase
+      .from('follow_ups')
+      .select('*, leads(full_name, email)')
+      .eq('user_id', user.id)
+      .eq('completed', false)
+      .order('follow_up_date', { ascending: true });
+
+    if (followUpsError) {
+      console.error('Follow-ups fetch error:', followUpsError);
+      return;
+    }
+
+    if (followUpsData) {
+      // Sort follow-ups: latest date first, but overdue ones at the bottom
+      const sortedFollowUps = followUpsData.sort((a, b) => {
+        const dateA = new Date(a.follow_up_date);
+        const dateB = new Date(b.follow_up_date);
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        
+        // If both are overdue, show the most recent overdue first
+        if (dateA < today && dateB < today) {
+          return dateB.getTime() - dateA.getTime(); // Most recent overdue first
+        }
+        
+        // If only one is overdue, put it at the end
+        if (dateA < today) return 1; // Put overdue at the bottom
+        if (dateB < today) return -1; // Put future at the top
+        
+        // Both are future dates, sort by closest date first
+        return dateA.getTime() - dateB.getTime();
+      });
+      
+      setFollowUps(sortedFollowUps);
+
+      // Now fetch leads with their follow-ups
+      const { data: leadsData, error: leadsError } = await supabase
+        .from('leads')
+        .select('*, follow_ups!inner(*)')
+        .eq('user_id', user.id)
+        .eq('follow_ups.completed', false)
+        .eq('follow_ups.user_id', user.id);
+
+      if (leadsError) {
+        console.error('Leads with follow-ups fetch error:', leadsError);
+        return;
+      }
+
+      if (leadsData) {
+        const leadsWithFollowUpsData = leadsData.map(lead => {
+          // Sort lead's follow-ups: latest date first, overdue last
+          const leadFollowUps = followUpsData
+            .filter(f => f.lead_id === lead.id)
+            .sort((a, b) => {
+              const dateA = new Date(a.follow_up_date);
+              const dateB = new Date(b.follow_up_date);
+              const today = new Date();
+              today.setHours(0, 0, 0, 0);
+              
+              // If both are overdue, show the most recent overdue first
+              if (dateA < today && dateB < today) {
+                return dateB.getTime() - dateA.getTime();
+              }
+              
+              // If only one is overdue, put it at the end
+              if (dateA < today) return 1;
+              if (dateB < today) return -1;
+              
+              // Both are future dates, sort by closest date first
+              return dateA.getTime() - dateB.getTime();
+            });
+          
+          return {
+            ...lead,
+            follow_ups: leadFollowUps
+          };
+        });
+        
+        // Sort leads based on their latest follow-up date
+        leadsWithFollowUpsData.sort((a, b) => {
+          const aLatestFollowUp = a.follow_ups[0]; // Get first (most recent) follow-up
+          const bLatestFollowUp = b.follow_ups[0];
+          
+          if (!aLatestFollowUp && !bLatestFollowUp) return 0;
+          if (!aLatestFollowUp) return 1;
+          if (!bLatestFollowUp) return -1;
+          
+          const dateA = new Date(aLatestFollowUp.follow_up_date);
+          const dateB = new Date(bLatestFollowUp.follow_up_date);
+          const today = new Date();
+          today.setHours(0, 0, 0, 0);
+          
+          // If both are overdue, show the most recent overdue first
+          if (dateA < today && dateB < today) {
+            return dateB.getTime() - dateA.getTime();
+          }
+          
+          // If only one is overdue, put it at the end
+          if (dateA < today) return 1;
+          if (dateB < today) return -1;
+          
+          // Both are future dates, sort by closest date first
+          return dateA.getTime() - dateB.getTime();
+        });
+        
+        setLeadsWithFollowUps(leadsWithFollowUpsData);
+      }
+    }
+  } catch (error) {
+    console.error('Fetch follow-ups error:', error);
+    showToast('Error fetching follow-ups', 'error');
+  }
+};
+
   const fetchTasks = async () => {
-    const { data, error } = await supabase
-      .from('tasks')
-      .select('*')
-      .order('due_date', { ascending: false });
-    if (!error && data) setTasks(data);
+    if (!user) return;
+    
+    try {
+      const { data, error } = await supabase
+        .from('tasks')
+        .select('*')
+        .eq('user_id', user.id)
+        .order('due_date', { ascending: false });
+      
+      if (!error && data) setTasks(data);
+    } catch (error) {
+      console.error('Fetch tasks error:', error);
+    }
   };
 
   const getTodayDate = () => {
@@ -174,54 +471,114 @@ export default function LeadManagement() {
     return today.toISOString().split('T')[0];
   };
 
+  const formatStatusDisplay = (status: string): string => {
+    switch (status) {
+      case 'new': return 'New';
+      case 'open': return 'Open';
+      case 'important': return 'Important';
+      default: return status;
+    }
+  };
+
   const addOrUpdateLead = async (e: React.FormEvent) => {
     e.preventDefault();
+    
+    if (!user) {
+      showToast('Please sign in to add leads', 'error');
+      return;
+    }
+    
     if (editingItem) {
       const { error } = await supabase
         .from('leads')
-        .update({ ...leadForm, updated_at: new Date().toISOString() })
-        .eq('id', editingItem.id);
+        .update({ 
+          full_name: leadForm.full_name,
+          email: leadForm.email,
+          phone: leadForm.phone,
+          company: leadForm.company,
+          job_title: leadForm.job_title,
+          location: leadForm.location,
+          source: leadForm.source,
+          status: leadForm.status,
+          industry: leadForm.industry,
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', editingItem.id)
+        .eq('user_id', user.id);
+      
       if (!error) {
-        fetchLeads();
-        resetLeadForm();
         showToast('Lead updated successfully!', 'success');
+        await fetchLeads();
+        resetLeadForm();
       } else {
-        showToast('Failed to update lead', 'error');
+        console.error('Update lead error:', error);
+        showToast(`Failed to update lead: ${error.message}`, 'error');
       }
     } else {
-      const { error } = await supabase.from('leads').insert([leadForm]);
+      const leadData = {
+        full_name: leadForm.full_name,
+        email: leadForm.email,
+        phone: leadForm.phone,
+        company: leadForm.company,
+        job_title: leadForm.job_title,
+        location: leadForm.location,
+        source: leadForm.source,
+        status: leadForm.status,
+        is_active: true,
+        industry: leadForm.industry,
+        user_id: user.id,
+        created_at: new Date().toISOString()
+      };
+      
+      const { data, error } = await supabase
+        .from('leads')
+        .insert([leadData])
+        .select();
+      
       if (!error) {
-        fetchLeads();
         resetLeadForm();
         showToast('Lead added successfully!', 'success');
+        await fetchLeads();
       } else {
-        showToast('Failed to add lead', 'error');
+        console.error('Insert lead error:', error);
+        showToast(`Failed to add lead: ${error.message}`, 'error');
       }
     }
   };
 
   const addOrUpdateFollowUp = async (e: React.FormEvent) => {
     e.preventDefault();
+    
+    if (!user) {
+      showToast('Please sign in to add follow-ups', 'error');
+      return;
+    }
+    
     if (new Date(followUpForm.follow_up_date) < new Date(getTodayDate())) {
       showToast('Follow-up date cannot be in the past!', 'error');
       return;
     }
+    
     if (editingItem) {
       const { error } = await supabase
         .from('follow_ups')
         .update(followUpForm)
-        .eq('id', editingItem.id);
+        .eq('id', editingItem.id)
+        .eq('user_id', user.id);
       if (!error) {
-        fetchFollowUps();
         resetFollowUpForm();
         showToast('Follow-up updated successfully!', 'success');
       } else {
         showToast('Failed to update follow-up', 'error');
       }
     } else {
-      const { error } = await supabase.from('follow_ups').insert([followUpForm]);
+      const { error } = await supabase.from('follow_ups').insert([{
+        ...followUpForm,
+        user_id: user.id,
+        created_at: new Date().toISOString(),
+        completed: false
+      }]);
       if (!error) {
-        fetchFollowUps();
         resetFollowUpForm();
         showToast('Follow-up scheduled successfully!', 'success');
       } else {
@@ -232,26 +589,37 @@ export default function LeadManagement() {
 
   const addOrUpdateTask = async (e: React.FormEvent) => {
     e.preventDefault();
+    
+    if (!user) {
+      showToast('Please sign in to add tasks', 'error');
+      return;
+    }
+    
     if (new Date(taskForm.due_date) < new Date(getTodayDate())) {
       showToast('Task due date cannot be in the past!', 'error');
       return;
     }
+    
     if (editingItem) {
       const { error } = await supabase
         .from('tasks')
         .update({ ...taskForm, updated_at: new Date().toISOString() })
-        .eq('id', editingItem.id);
+        .eq('id', editingItem.id)
+        .eq('user_id', user.id);
       if (!error) {
-        fetchTasks();
         resetTaskForm();
         showToast('Task updated successfully!', 'success');
       } else {
         showToast('Failed to update task', 'error');
       }
     } else {
-      const { error } = await supabase.from('tasks').insert([taskForm]);
+      const { error } = await supabase.from('tasks').insert([{
+        ...taskForm,
+        user_id: user.id,
+        created_at: new Date().toISOString(),
+        completed: false
+      }]);
       if (!error) {
-        fetchTasks();
         resetTaskForm();
         showToast('Task created successfully!', 'success');
       } else {
@@ -260,51 +628,53 @@ export default function LeadManagement() {
     }
   };
 
-const toggleLeadStatus = async (lead: Lead) => {
-  const currentStatus = lead.status;
-  let newStatus: 'New' | 'Open' | 'Important';
-  
-  // Status rotation: New → Open → Important → New
-  if (currentStatus === 'New') {
-    newStatus = 'Open';
-  } else if (currentStatus === 'Open') {
-    newStatus = 'Important';
-  } else {
-    newStatus = 'New';
-  }
-  
-  const { error } = await supabase
-    .from('leads')
-    .update({ status: newStatus, updated_at: new Date().toISOString() })
-    .eq('id', lead.id);
-  if (!error) {
-    fetchLeads();
-    showToast(`Lead status changed to ${newStatus}`, 'success');
-  } else {
-    showToast('Failed to update lead status', 'error');
-  }
-};
-  const toggleLeadActiveStatus = async (lead: Lead) => {
-    const newActiveStatus = !lead.is_active;
+  const updateLeadStatus = async (lead: Lead, newStatus: string) => {
+    if (!user) return;
+    
     const { error } = await supabase
       .from('leads')
-      .update({ is_active: newActiveStatus, updated_at: new Date().toISOString() })
-      .eq('id', lead.id);
+      .update({ 
+        status: newStatus.toLowerCase(),
+        updated_at: new Date().toISOString() 
+      })
+      .eq('id', lead.id)
+      .eq('user_id', user.id);
+    
     if (!error) {
-      fetchLeads();
-      showToast(`Lead ${newActiveStatus ? 'activated' : 'deactivated'} successfully!`, 'success');
+      showToast(`Lead status changed to ${formatStatusDisplay(newStatus.toLowerCase())}`, 'success');
     } else {
-      showToast('Failed to update lead status', 'error');
+      showToast(`Failed to update lead status: ${error.message}`, 'error');
+    }
+  };
+
+  const updateLeadActiveStatus = async (lead: Lead, isActive: boolean) => {
+    if (!user) return;
+    
+    const { error } = await supabase
+      .from('leads')
+      .update({ 
+        is_active: isActive,
+        updated_at: new Date().toISOString() 
+      })
+      .eq('id', lead.id)
+      .eq('user_id', user.id);
+    
+    if (!error) {
+      showToast(`Lead ${isActive ? 'activated' : 'deactivated'} successfully!`, 'success');
+    } else {
+      showToast(`Failed to update lead active status: ${error.message}`, 'error');
     }
   };
 
   const toggleTaskComplete = async (task: Task) => {
+    if (!user) return;
+    
     const { error } = await supabase
       .from('tasks')
       .update({ completed: !task.completed })
-      .eq('id', task.id);
+      .eq('id', task.id)
+      .eq('user_id', user.id);
     if (!error) {
-      fetchTasks();
       showToast(task.completed ? 'Task marked as incomplete' : 'Task completed!', 'success');
     } else {
       showToast('Failed to update task', 'error');
@@ -312,12 +682,14 @@ const toggleLeadStatus = async (lead: Lead) => {
   };
 
   const completeFollowUp = async (followUp: FollowUp) => {
+    if (!user) return;
+    
     const { error } = await supabase
       .from('follow_ups')
       .update({ completed: true, completed_at: new Date().toISOString() })
-      .eq('id', followUp.id);
+      .eq('id', followUp.id)
+      .eq('user_id', user.id);
     if (!error) {
-      fetchFollowUps();
       showToast('Follow-up marked as completed!', 'success');
     } else {
       showToast('Failed to complete follow-up', 'error');
@@ -325,81 +697,19 @@ const toggleLeadStatus = async (lead: Lead) => {
   };
 
   const viewFollowUpHistory = async (lead: Lead) => {
+    if (!user) return;
+    
     setSelectedLead(lead);
     const { data, error } = await supabase
       .from('follow_ups')
       .select('*')
       .eq('lead_id', lead.id)
+      .eq('user_id', user.id)
       .order('follow_up_date', { ascending: false });
     if (!error && data) {
       setFollowUpHistory(data);
       setIsHistoryModalOpen(true);
     }
-  };
-
-  const exportHistoryToPDF = () => {
-    if (!selectedLead || followUpHistory.length === 0) return;
-
-    const printWindow = window.open('', '_blank');
-    if (!printWindow) return;
-
-    const htmlContent = `
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <title>Follow-up History - ${selectedLead.full_name}</title>
-        <style>
-          body { font-family: Arial, sans-serif; padding: 40px; }
-          h1 { color: #1f2937; border-bottom: 3px solid #8b5cf6; padding-bottom: 10px; }
-          .info { margin: 20px 0; color: #4b5563; }
-          table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-          th { background-color: #8b5cf6; color: white; padding: 12px; text-align: left; }
-          td { padding: 10px; border-bottom: 1px solid #e5e7eb; }
-          tr:nth-child(even) { background-color: #f9fafb; }
-          .status { padding: 4px 8px; border-radius: 4px; font-size: 12px; font-weight: bold; }
-          .completed { background-color: #10b981; color: white; }
-          .pending { background-color: #f59e0b; color: white; }
-        </style>
-      </head>
-      <body>
-        <h1>Follow-up History</h1>
-        <div class="info">
-          <strong>Lead Name:</strong> ${selectedLead.full_name}<br>
-          <strong>Email:</strong> ${selectedLead.email}<br>
-          <strong>Company:</strong> ${selectedLead.company || 'N/A'}<br>
-          <strong>Report Generated:</strong> ${new Date().toLocaleString()}
-        </div>
-        <table>
-          <thead>
-            <tr>
-              <th>Date Added</th>
-              <th>Follow-up Date</th>
-              <th>Remarks</th>
-              <th>Status</th>
-              <th>Completed Date</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${followUpHistory.map(h => `
-              <tr>
-                <td>${new Date(h.created_at).toLocaleDateString()}</td>
-                <td>${new Date(h.follow_up_date).toLocaleDateString()}</td>
-                <td>${h.remarks || '-'}</td>
-                <td><span class="status ${h.completed ? 'completed' : 'pending'}">${h.completed ? 'Completed' : 'Pending'}</span></td>
-                <td>${h.completed_at ? new Date(h.completed_at).toLocaleDateString() : '-'}</td>
-              </tr>
-            `).join('')}
-          </tbody>
-        </table>
-      </body>
-      </html>
-    `;
-
-    printWindow.document.write(htmlContent);
-    printWindow.document.close();
-    setTimeout(() => {
-      printWindow.print();
-    }, 250);
   };
 
   const saveHistoryAsPDF = async () => {
@@ -416,6 +726,8 @@ const toggleLeadStatus = async (lead: Lead) => {
           <strong>Email:</strong> ${selectedLead.email}<br>
           <strong>Company:</strong> ${selectedLead.company || 'N/A'}<br>
           <strong>Phone:</strong> ${selectedLead.phone || 'N/A'}<br>
+          <strong>Status:</strong> ${formatStatusDisplay(selectedLead.status)}<br>
+          <strong>Active Status:</strong> ${selectedLead.is_active ? 'Active' : 'Inactive'}<br>
           <strong>Report Generated:</strong> ${new Date().toLocaleString()}
         </div>
         <table style="width: 100%; border-collapse: collapse; margin-top: 20px;">
@@ -473,7 +785,6 @@ const toggleLeadStatus = async (lead: Lead) => {
       showToast('PDF saved successfully!', 'success');
     } catch (error) {
       showToast('Failed to save PDF', 'error');
-      console.error('PDF generation error:', error);
     } finally {
       document.body.removeChild(element);
     }
@@ -488,8 +799,7 @@ const toggleLeadStatus = async (lead: Lead) => {
       job_title: '',
       location: '',
       source: 'Website',
-      status: 'New',
-      is_active: true,
+      status: 'new',
       industry: ''
     });
     setEditingItem(null);
@@ -527,7 +837,6 @@ const toggleLeadStatus = async (lead: Lead) => {
       location: lead.location || '',
       source: lead.source || 'Website',
       status: lead.status,
-      is_active: lead.is_active || true,
       industry: lead.industry || ''
     });
     setIsLeadModalOpen(true);
@@ -591,8 +900,8 @@ const toggleLeadStatus = async (lead: Lead) => {
       lead.job_title || '',
       lead.location || '',
       lead.source || '',
-      lead.status,
-      lead.is_active ? 'Yes' : 'No',
+      formatStatusDisplay(lead.status),
+      lead.is_active ? 'Active' : 'Inactive',
       lead.industry || '',
       new Date(lead.created_at).toLocaleDateString()
     ]);
@@ -621,8 +930,8 @@ const toggleLeadStatus = async (lead: Lead) => {
       lead.job_title || '',
       lead.location || '',
       lead.source || '',
-      lead.status,
-      lead.is_active ? 'Yes' : 'No',
+      formatStatusDisplay(lead.status),
+      lead.is_active ? 'Active' : 'Inactive',
       lead.industry || '',
       new Date(lead.created_at).toLocaleDateString()
     ]);
@@ -665,22 +974,24 @@ const toggleLeadStatus = async (lead: Lead) => {
             job_title: values[4] || '',
             location: values[5] || '',
             source: values[6] || 'Other',
-            status: values[7] || 'New',
-            is_active: values[8]?.toLowerCase() === 'yes' || true,
-            industry: values[9] || ''
+            status: (values[7]?.toLowerCase() || 'new') as 'new' | 'open' | 'important',
+            is_active: values[8]?.toLowerCase() === 'active' || true,
+            industry: values[9] || '',
+            user_id: user?.id || '',
+            created_at: new Date().toISOString()
           };
           importedLeads.push(lead);
         }
       }
 
-      if (importedLeads.length > 0) {
+      if (importedLeads.length > 0 && user) {
         const { error } = await supabase.from('leads').insert(importedLeads);
         if (!error) {
           showToast(`Successfully imported ${importedLeads.length} leads!`, 'success');
-          fetchLeads();
           setIsImportModalOpen(false);
+          await fetchLeads();
         } else {
-          showToast('Error importing leads. Please check the file format.', 'error');
+          showToast(`Error importing leads: ${error.message}`, 'error');
         }
       }
     };
@@ -688,7 +999,42 @@ const toggleLeadStatus = async (lead: Lead) => {
   };
 
   const filteredLeads = getFilteredAndSortedLeads();
-const activeLeads = filteredLeads.filter(lead => lead.is_active);
+  const activeLeads = filteredLeads.filter(lead => lead.is_active === true);
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-gray-50 to-blue-50 flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
+          <p className="text-gray-600">Loading...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-gray-50 to-blue-50 flex items-center justify-center p-4">
+        <div className="max-w-md w-full bg-white rounded-2xl shadow-2xl p-8 text-center">
+          <h1 className="text-3xl font-bold text-gray-800 mb-2">Lead Management System</h1>
+          <p className="text-gray-600 mb-6">Please sign in to access your leads</p>
+          
+          <button
+            onClick={signInWithGoogle}
+            className="w-full bg-white border-2 border-gray-300 hover:border-gray-400 text-gray-700 px-6 py-3 rounded-lg font-medium transition-all hover:shadow-lg flex items-center justify-center gap-3"
+          >
+            <svg className="w-5 h-5" viewBox="0 0 24 24">
+              <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+              <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+              <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
+              <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
+            </svg>
+            Sign in with Google
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-50 to-blue-50 p-4 md:p-8">
@@ -703,11 +1049,42 @@ const activeLeads = filteredLeads.filter(lead => lead.is_active);
       )}
 
       <div className="max-w-7xl mx-auto">
-        <div className="mb-8 text-center">
-          <h1 className="text-4xl md:text-5xl font-bold text-gray-800 mb-2">
-            Lead Management System
-          </h1>
-          <p className="text-gray-600">Streamline your lead tracking and follow-ups</p>
+        <div className="flex justify-between items-center mb-8">
+          <div>
+            <h1 className="text-4xl md:text-5xl font-bold text-gray-800 mb-2">
+              Lead Management System
+            </h1>
+            <p className="text-gray-600">Welcome, {user.full_name || user.email}</p>
+          </div>
+          <div className="flex items-center gap-4">
+            <div className="flex items-center gap-3">
+              {user.avatar_url ? (
+                <div className="relative w-10 h-10 rounded-full overflow-hidden border-2 border-white shadow-lg">
+                  <Image
+                    src={user.avatar_url}
+                    alt={user.full_name || user.email}
+                    fill
+                    className="object-cover"
+                    sizes="40px"
+                  />
+                </div>
+              ) : (
+                <div className="w-10 h-10 rounded-full bg-gradient-to-r from-blue-500 to-indigo-500 flex items-center justify-center text-white font-bold shadow-lg">
+                  {(user.full_name || user.email).charAt(0).toUpperCase()}
+                </div>
+              )}
+              <div className="text-right hidden md:block">
+                <p className="font-medium text-gray-800">{user.full_name || user.email}</p>
+                <p className="text-sm text-gray-500">Sales Representative</p>
+              </div>
+            </div>
+            <button
+              onClick={signOut}
+              className="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg transition-all hover:scale-105 shadow-md text-sm md:text-base"
+            >
+              Sign Out
+            </button>
+          </div>
         </div>
 
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3 md:gap-4 mb-6">
@@ -854,27 +1231,31 @@ const activeLeads = filteredLeads.filter(lead => lead.is_active);
                       <td className="px-4 py-4">
                         <select
                           value={lead.status}
-                          onChange={() => toggleLeadStatus(lead)}
+                          onChange={(e) => updateLeadStatus(lead, e.target.value)}
                           className={`px-3 py-1 rounded-lg text-xs font-bold cursor-pointer ${
-                            lead.status === 'Active'
+                            lead.status === 'new' ? 'bg-blue-500 text-white' :
+                            lead.status === 'open' ? 'bg-green-500 text-white' :
+                            'bg-orange-500 text-white'
+                          }`}
+                        >
+                          <option value="new">New</option>
+                          <option value="open">Open</option>
+                          <option value="important">Important</option>
+                        </select>
+                      </td>
+                      <td className="px-4 py-4">
+                        <select
+                          value={lead.is_active ? 'Active' : 'Inactive'}
+                          onChange={(e) => updateLeadActiveStatus(lead, e.target.value === 'Active')}
+                          className={`px-3 py-1 rounded-lg text-xs font-bold cursor-pointer ${
+                            lead.is_active
                               ? 'bg-green-500 text-white'
-                              : 'bg-gray-400 text-white'
+                              : 'bg-red-500 text-white'
                           }`}
                         >
                           <option value="Active">Active</option>
                           <option value="Inactive">Inactive</option>
                         </select>
-                      </td>
-                      <td className="px-4 py-4">
-                        <button
-                          className={`px-3 py-1 rounded-lg text-xs font-bold cursor-pointer transition-all pointer-events-none cursor-default ${
-                            lead.status == "Active"
-                            ? 'bg-green-500 text-white hover:bg-green-600'
-                            : 'bg-red-500 text-white hover:bg-red-600'
-                          }`}
-                        >
-                          {lead.status == "Active" ? "Yes" : "No" }
-                        </button>
                       </td>
                       <td className="px-4 py-4 text-sm">
                         <button
@@ -903,6 +1284,8 @@ const activeLeads = filteredLeads.filter(lead => lead.is_active);
           </div>
         )}
 
+        {/* Rest of the JSX remains the same... */}
+        {/* ... */}
         {activeTab === 'active-leads' && (
           <div className="bg-white rounded-2xl shadow-xl p-4 md:p-6">
             <div className="flex justify-between items-center mb-6">
@@ -918,6 +1301,7 @@ const activeLeads = filteredLeads.filter(lead => lead.is_active);
                     <th className="px-4 py-4 text-left text-sm font-semibold hidden md:table-cell">Phone</th>
                     <th className="px-4 py-4 text-left text-sm font-semibold hidden md:table-cell">Company</th>
                     <th className="px-4 py-4 text-left text-sm font-semibold">Source</th>
+                    <th className="px-4 py-4 text-left text-sm font-semibold">Status</th>
                     <th className="px-4 py-4 text-left text-sm font-semibold">Actions</th>
                   </tr>
                 </thead>
@@ -933,6 +1317,21 @@ const activeLeads = filteredLeads.filter(lead => lead.is_active);
                       <td className="px-4 py-4 text-sm text-gray-600 hidden md:table-cell">{lead.phone || '-'}</td>
                       <td className="px-4 py-4 text-sm text-gray-600 hidden md:table-cell">{lead.company || '-'}</td>
                       <td className="px-4 py-4 text-sm text-gray-600">{lead.source || '-'}</td>
+                      <td className="px-4 py-4">
+                        <select
+                          value={lead.status}
+                          onChange={(e) => updateLeadStatus(lead, e.target.value)}
+                          className={`px-3 py-1 rounded-lg text-xs font-bold cursor-pointer ${
+                            lead.status === 'new' ? 'bg-blue-500 text-white' :
+                            lead.status === 'open' ? 'bg-green-500 text-white' :
+                            'bg-orange-500 text-white'
+                          }`}
+                        >
+                          <option value="new">New</option>
+                          <option value="open">Open</option>
+                          <option value="important">Important</option>
+                        </select>
+                      </td>
                       <td className="px-4 py-4 text-sm">
                         <button
                           onClick={() => {
@@ -957,80 +1356,128 @@ const activeLeads = filteredLeads.filter(lead => lead.is_active);
           </div>
         )}
 
-        {activeTab === 'followups' && (
-          <div className="bg-white rounded-2xl shadow-xl p-4 md:p-6">
-            <div className="flex justify-between items-center mb-6">
-              <h2 className="text-2xl md:text-3xl font-bold text-gray-800">Follow-ups</h2>
-            </div>
-            <div className="grid gap-4">
-              {leadsWithFollowUps.map((leadWithFollowUps, index) => {
-                const latestFollowUp = leadWithFollowUps.follow_ups[0];
-                return (
-                  <div
-                    key={leadWithFollowUps.id}
-                    className="border-2 border-purple-200 rounded-xl p-4 md:p-5 hover:shadow-lg transition-all bg-gradient-to-r from-purple-50 to-pink-50 animate-slideUp"
-                    style={{ animationDelay: `${index * 0.1}s` }}
-                  >
-                    <div className="flex flex-col md:flex-row justify-between items-start gap-4">
-                      <div className="flex-1 w-full">
-                        <h3 className="text-lg md:text-xl font-semibold text-gray-900 mb-2">
-                          {leadWithFollowUps.full_name}
-                        </h3>
-                        <div className="space-y-2">
-                          <p className="text-sm text-gray-700">
-                            <span className="font-medium text-purple-600">📧 Email:</span>{' '}
-                            {leadWithFollowUps.email}
-                          </p>
-                          <p className="text-sm text-gray-700">
-                            <span className="font-medium text-purple-600">📅 Next Follow-up:</span>{' '}
-                            {new Date(latestFollowUp.follow_up_date).toLocaleDateString()}
-                            {leadWithFollowUps.follow_ups.length > 1 && (
-                              <span className="ml-2 bg-purple-100 text-purple-800 px-2 py-1 rounded text-xs">
-                                +{leadWithFollowUps.follow_ups.length - 1} more
-                              </span>
-                            )}
-                          </p>
-                          {latestFollowUp.remarks && (
-                            <p className="text-sm text-gray-700">
-                              <span className="font-medium text-purple-600">📝 Remarks:</span> {latestFollowUp.remarks}
-                            </p>
-                          )}
-                        </div>
-                      </div>
-                      <div className="flex flex-wrap gap-2 w-full md:w-auto">
-                        <button
-                          onClick={() => {
-                            setFollowUpForm({ 
-                              ...followUpForm, 
-                              lead_id: leadWithFollowUps.id,
-                              follow_up_date: getTodayDate()
-                            });
-                            setIsFollowUpModalOpen(true);
-                          }}
-                          className="flex-1 md:flex-none bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg text-sm transition-all hover:scale-105 shadow-md"
-                        >
-                          Add New
-                        </button>
-                        <button
-                          onClick={() => viewFollowUpHistory(leadWithFollowUps)}
-                          className="flex-1 md:flex-none bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg text-sm transition-all hover:scale-105 shadow-md"
-                        >
-                          History ({leadWithFollowUps.follow_ups.length})
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                );
-              })}
-              {leadsWithFollowUps.length === 0 && (
-                <div className="text-center py-16 text-gray-400">
-                  <div className="text-6xl mb-4">🎉</div>
-                  <p className="text-xl">No upcoming follow-ups</p>
+       {activeTab === 'followups' && (
+  <div className="bg-white rounded-2xl shadow-xl p-4 md:p-6">
+    <div className="flex justify-between items-center mb-6">
+      <h2 className="text-2xl md:text-3xl font-bold text-gray-800">Follow-ups</h2>
+    </div>
+    <div className="grid gap-4">
+      {leadsWithFollowUps.map((leadWithFollowUps, index) => {
+        // Sort follow-ups for display: latest date first, overdue last
+        const sortedFollowUps = leadWithFollowUps.follow_ups.sort((a, b) => {
+          const dateA = new Date(a.follow_up_date);
+          const dateB = new Date(b.follow_up_date);
+          const today = new Date();
+          today.setHours(0, 0, 0, 0);
+          
+          // If both are overdue, show the most recent overdue first
+          if (dateA < today && dateB < today) {
+            return dateB.getTime() - dateA.getTime();
+          }
+          
+          // If only one is overdue, put it at the end
+          if (dateA < today) return 1;
+          if (dateB < today) return -1;
+          
+          // Both are future dates, sort by closest date first
+          return dateA.getTime() - dateB.getTime();
+        });
+        
+        const latestFollowUp = sortedFollowUps[0]; // Get the most recent one
+        const hasPastFollowUps = sortedFollowUps.some(f => new Date(f.follow_up_date) < new Date());
+        
+        return (
+          <div
+            key={leadWithFollowUps.id}
+            className={`border-2 rounded-xl p-4 md:p-5 hover:shadow-lg transition-all animate-slideUp ${
+              hasPastFollowUps 
+                ? 'border-red-200 bg-gradient-to-r from-red-50 to-orange-50' 
+                : 'border-purple-200 bg-gradient-to-r from-purple-50 to-pink-50'
+            }`}
+            style={{ animationDelay: `${index * 0.1}s` }}
+          >
+            <div className="flex flex-col md:flex-row justify-between items-start gap-4">
+              <div className="flex-1 w-full">
+                <div className="flex items-center gap-2 mb-2">
+                  <h3 className="text-lg md:text-xl font-semibold text-gray-900">
+                    {leadWithFollowUps.full_name}
+                  </h3>
+                  {hasPastFollowUps && (
+                    <span className="bg-red-500 text-white px-2 py-1 rounded text-xs font-bold">
+                      Past Follow-up
+                    </span>
+                  )}
                 </div>
-              )}
+                <div className="space-y-2">
+                  <p className="text-sm text-gray-700">
+                    <span className="font-medium text-purple-600">📧 Email:</span>{' '}
+                    {leadWithFollowUps.email}
+                  </p>
+                  <p className="text-sm text-gray-700">
+                    <span className="font-medium text-purple-600">📅 Next Follow-up:</span>{' '}
+                    {new Date(latestFollowUp.follow_up_date).toLocaleDateString()}
+                    {new Date(latestFollowUp.follow_up_date) < new Date() && (
+                      <span className="ml-2 bg-red-100 text-red-800 px-2 py-1 rounded text-xs">
+                        Overdue
+                      </span>
+                    )}
+                    {leadWithFollowUps.follow_ups.length > 1 && (
+                      <span className="ml-2 bg-purple-100 text-purple-800 px-2 py-1 rounded text-xs">
+                        +{leadWithFollowUps.follow_ups.length - 1} more
+                      </span>
+                    )}
+                  </p>
+                  {latestFollowUp.remarks && (
+                    <p className="text-sm text-gray-700">
+                      <span className="font-medium text-purple-600">📝 Remarks:</span> {latestFollowUp.remarks}
+                    </p>
+                  )}
+                  <p className="text-sm text-gray-700">
+                    <span className="font-medium text-purple-600">📊 Active Status:</span>{' '}
+                    <span className={`px-2 py-1 rounded text-xs font-bold ${
+                      leadWithFollowUps.is_active
+                        ? 'bg-green-500 text-white'
+                        : 'bg-red-500 text-white'
+                    }`}>
+                      {leadWithFollowUps.is_active ? 'Active' : 'Inactive'}
+                    </span>
+                  </p>
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-2 w-full md:w-auto">
+                <button
+                  onClick={() => {
+                    setFollowUpForm({ 
+                      ...followUpForm, 
+                      lead_id: leadWithFollowUps.id,
+                      follow_up_date: getTodayDate()
+                    });
+                    setIsFollowUpModalOpen(true);
+                  }}
+                  className="flex-1 md:flex-none bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg text-sm transition-all hover:scale-105 shadow-md"
+                >
+                  Add New
+                </button>
+                <button
+                  onClick={() => viewFollowUpHistory(leadWithFollowUps)}
+                  className="flex-1 md:flex-none bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg text-sm transition-all hover:scale-105 shadow-md"
+                >
+                  History ({leadWithFollowUps.follow_ups.length})
+                </button>
+              </div>
             </div>
           </div>
-        )}
+        );
+      })}
+      {leadsWithFollowUps.length === 0 && (
+        <div className="text-center py-16 text-gray-400">
+          <div className="text-6xl mb-4">🎉</div>
+          <p className="text-xl">No upcoming follow-ups</p>
+        </div>
+      )}
+    </div>
+  </div>
+)}
 
         {activeTab === 'tasks' && (
           <div className="bg-white rounded-2xl shadow-xl p-4 md:p-6">
@@ -1192,40 +1639,27 @@ const activeLeads = filteredLeads.filter(lead => lead.is_active);
                       <option value="Other">Other</option>
                     </select>
                   </div>
-                <div>
-  <label className="block text-sm font-medium text-gray-700 mb-2">Status</label>
-  <select
-    value={leadForm.status}
-    onChange={(e) => setLeadForm({ ...leadForm, status: e.target.value as 'New' | 'Open' | 'Important' })}
-    className="w-full px-4 py-3 border-2 border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
-  >
-    <option value="New">New</option>
-    <option value="Open">Open</option>
-    <option value="Important">Important</option>
-  </select>
-</div>
-                </div>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">Is Active</label>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">Status</label>
                     <select
-                      value={leadForm.is_active ? 'true' : 'false'}
-                      onChange={(e) => setLeadForm({ ...leadForm, is_active: e.target.value === 'true' })}
+                      value={leadForm.status}
+                      onChange={(e) => setLeadForm({ ...leadForm, status: e.target.value as any })}
                       className="w-full px-4 py-3 border-2 border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
                     >
-                      <option value="true">Yes</option>
-                      <option value="false">No</option>
+                      <option value="new">New</option>
+                      <option value="open">Open</option>
+                      <option value="important">Important</option>
                     </select>
                   </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">Industry</label>
-                    <input
-                      type="text"
-                      value={leadForm.industry}
-                      onChange={(e) => setLeadForm({ ...leadForm, industry: e.target.value })}
-                      className="w-full px-4 py-3 border-2 border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
-                    />
-                  </div>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Industry</label>
+                  <input
+                    type="text"
+                    value={leadForm.industry}
+                    onChange={(e) => setLeadForm({ ...leadForm, industry: e.target.value })}
+                    className="w-full px-4 py-3 border-2 border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
+                  />
                 </div>
                 <div className="flex gap-4 pt-4">
                   <button
@@ -1265,7 +1699,7 @@ const activeLeads = filteredLeads.filter(lead => lead.is_active);
                     className="w-full px-4 py-3 border-2 border-gray-200 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all"
                   >
                     <option value="">Select a lead</option>
-                    {leads.filter(l => l.status === 'Active' && l.is_active).map((lead) => (
+                    {leads.filter(l => l.is_active).map((lead) => (
                       <option key={lead.id} value={lead.id}>
                         {lead.full_name} - {lead.email}
                       </option>
@@ -1410,18 +1844,25 @@ const activeLeads = filteredLeads.filter(lead => lead.is_active);
                         <span className="font-semibold">Company:</span> {selectedLead.company}
                       </p>
                     )}
-                <p className="text-sm text-gray-700 mb-2">
-  <span className="font-semibold">Status:</span> 
-  <span className={`ml-2 px-3 py-1 rounded-full text-xs font-bold ${
-    selectedLead?.status === 'New' ? 'bg-blue-500 text-white' :
-    selectedLead?.status === 'Open' ? 'bg-green-500 text-white' :
-    'bg-orange-500 text-white'
-  }`}>
-    {selectedLead?.status}
-  </span>
-</p>
                     <p className="text-sm text-gray-700 mb-2">
-                      <span className="font-semibold">Report Generated:</span> {new Date().toLocaleString()}
+                      <span className="font-semibold">Status:</span> 
+                      <span className={`ml-2 px-3 py-1 rounded-full text-xs font-bold ${
+                        selectedLead?.status === 'new' ? 'bg-blue-500 text-white' :
+                        selectedLead?.status === 'open' ? 'bg-green-500 text-white' :
+                        'bg-orange-500 text-white'
+                      }`}>
+                        {formatStatusDisplay(selectedLead?.status || '')}
+                      </span>
+                    </p>
+                    <p className="text-sm text-gray-700 mb-2">
+                      <span className="font-semibold">Active Status:</span>
+                      <span className={`ml-2 px-3 py-1 rounded-full text-xs font-bold ${
+                        selectedLead?.is_active
+                          ? 'bg-green-500 text-white'
+                          : 'bg-red-500 text-white'
+                      }`}>
+                        {selectedLead?.is_active ? 'Active' : 'Inactive'}
+                      </span>
                     </p>
                   </div>
                 </div>
@@ -1441,7 +1882,7 @@ const activeLeads = filteredLeads.filter(lead => lead.is_active);
                         <th className="px-4 py-3 text-left text-sm font-semibold">Scheduled For</th>
                         <th className="px-4 py-3 text-left text-sm font-semibold">Remarks</th>
                         <th className="px-4 py-3 text-left text-sm font-semibold">Status</th>
-                        <th className="px-4 py-3 text-left text-sm font-semibold">Completed</th>
+                        <th className="px-4 py-3 text-left text-sm font-semibold">Completed Date</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-100">
@@ -1495,15 +1936,6 @@ const activeLeads = filteredLeads.filter(lead => lead.is_active);
                   Save as PDF
                 </button>
                 <button
-                  onClick={exportHistoryToPDF}
-                  className="flex-1 bg-gradient-to-r from-blue-600 to-indigo-600 text-white py-3 rounded-lg hover:from-blue-700 hover:to-indigo-700 transition-all font-medium shadow-lg hover:scale-105 flex items-center justify-center gap-2"
-                >
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z" />
-                  </svg>
-                  Print
-                </button>
-                <button
                   onClick={() => setIsHistoryModalOpen(false)}
                   className="flex-1 bg-gray-200 text-gray-700 py-3 rounded-lg hover:bg-gray-300 transition-all font-medium"
                 >
@@ -1525,7 +1957,7 @@ const activeLeads = filteredLeads.filter(lead => lead.is_active);
                     Upload CSV or Excel file with leads data
                   </p>
                   <p className="text-sm text-gray-500 mb-4">
-                    Format: Full Name, Email, Phone, Company, Job Title, Location, Source, Status, Is Active (Yes/No), Industry
+                    Format: Full Name, Email, Phone, Company, Job Title, Location, Source, Status, Industry
                   </p>
                   <input
                     type="file"
@@ -1553,7 +1985,7 @@ const activeLeads = filteredLeads.filter(lead => lead.is_active);
         )}
       </div>
 
-      <style jsx>{`
+                  <style jsx>{`
         @keyframes fadeIn {
           from {
             opacity: 0;
@@ -1582,8 +2014,8 @@ const activeLeads = filteredLeads.filter(lead => lead.is_active);
           to {
             opacity: 1;
             transform: translateY(0);
-          }
-        }
+            }
+            }
 
         @keyframes scaleIn {
           from {
@@ -1593,13 +2025,13 @@ const activeLeads = filteredLeads.filter(lead => lead.is_active);
           to {
             opacity: 1;
             transform: scale(1);
-          }
+            }
+            }
+            
+            .animate-fadeIn {
+              animation: fadeIn 0.3s ease-out;
         }
-
-        .animate-fadeIn {
-          animation: fadeIn 0.3s ease-out;
-        }
-
+        
         .animate-slideUp {
           animation: slideUp 0.4s ease-out;
         }
@@ -1611,7 +2043,7 @@ const activeLeads = filteredLeads.filter(lead => lead.is_active);
         .animate-scaleIn {
           animation: scaleIn 0.3s ease-out;
         }
-      `}</style>
-    </div>
+        `}</style>
+        </div>
   );
 }
