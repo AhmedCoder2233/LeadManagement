@@ -857,14 +857,13 @@ export default function LeadManagement() {
                       </td>
                       <td className="px-4 py-4">
                         <button
-                          onClick={() => toggleLeadActiveStatus(lead)}
-                          className={`px-3 py-1 rounded-lg text-xs font-bold cursor-pointer transition-all ${
-                            lead.is_active
-                              ? 'bg-green-500 text-white hover:bg-green-600'
-                              : 'bg-red-500 text-white hover:bg-red-600'
+                          className={`px-3 py-1 rounded-lg text-xs font-bold cursor-pointer transition-all pointer-events-none cursor-default ${
+                            lead.status == "Active"
+                            ? 'bg-green-500 text-white hover:bg-green-600'
+                            : 'bg-red-500 text-white hover:bg-red-600'
                           }`}
                         >
-                          {lead.is_active ? 'Yes' : 'No'}
+                          {lead.status == "Active" ? "Yes" : "No" }
                         </button>
                       </td>
                       <td className="px-4 py-4 text-sm">
