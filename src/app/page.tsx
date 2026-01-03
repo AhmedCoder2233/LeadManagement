@@ -19,7 +19,7 @@ interface Lead {
   job_title?: string;
   location?: string;
   source?: string;
-  status: string;
+  status: 'New' | 'Open' | 'Important'; 
   is_active?: boolean;
   industry?: string;
   created_at: string;
@@ -81,7 +81,7 @@ export default function LeadManagement() {
     job_title: '',
     location: '',
     source: 'Website',
-    status: 'Active',
+    status: 'New',
     is_active: true,
     industry: ''
   });
@@ -260,20 +260,30 @@ export default function LeadManagement() {
     }
   };
 
-  const toggleLeadStatus = async (lead: Lead) => {
-    const newStatus = lead.status === 'Active' ? 'Inactive' : 'Active';
-    const { error } = await supabase
-      .from('leads')
-      .update({ status: newStatus, updated_at: new Date().toISOString() })
-      .eq('id', lead.id);
-    if (!error) {
-      fetchLeads();
-      showToast(`Lead marked as ${newStatus}`, 'success');
-    } else {
-      showToast('Failed to update lead status', 'error');
-    }
-  };
-
+const toggleLeadStatus = async (lead: Lead) => {
+  const currentStatus = lead.status;
+  let newStatus: 'New' | 'Open' | 'Important';
+  
+  // Status rotation: New → Open → Important → New
+  if (currentStatus === 'New') {
+    newStatus = 'Open';
+  } else if (currentStatus === 'Open') {
+    newStatus = 'Important';
+  } else {
+    newStatus = 'New';
+  }
+  
+  const { error } = await supabase
+    .from('leads')
+    .update({ status: newStatus, updated_at: new Date().toISOString() })
+    .eq('id', lead.id);
+  if (!error) {
+    fetchLeads();
+    showToast(`Lead status changed to ${newStatus}`, 'success');
+  } else {
+    showToast('Failed to update lead status', 'error');
+  }
+};
   const toggleLeadActiveStatus = async (lead: Lead) => {
     const newActiveStatus = !lead.is_active;
     const { error } = await supabase
@@ -478,7 +488,7 @@ export default function LeadManagement() {
       job_title: '',
       location: '',
       source: 'Website',
-      status: 'Active',
+      status: 'New',
       is_active: true,
       industry: ''
     });
@@ -655,7 +665,7 @@ export default function LeadManagement() {
             job_title: values[4] || '',
             location: values[5] || '',
             source: values[6] || 'Other',
-            status: values[7] || 'Active',
+            status: values[7] || 'New',
             is_active: values[8]?.toLowerCase() === 'yes' || true,
             industry: values[9] || ''
           };
@@ -678,7 +688,7 @@ export default function LeadManagement() {
   };
 
   const filteredLeads = getFilteredAndSortedLeads();
-  const activeLeads = filteredLeads.filter(lead => lead.status === 'Active');
+const activeLeads = filteredLeads.filter(lead => lead.is_active);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-50 to-blue-50 p-4 md:p-8">
@@ -1182,17 +1192,18 @@ export default function LeadManagement() {
                       <option value="Other">Other</option>
                     </select>
                   </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">Status</label>
-                    <select
-                      value={leadForm.status}
-                      onChange={(e) => setLeadForm({ ...leadForm, status: e.target.value })}
-                      className="w-full px-4 py-3 border-2 border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
-                    >
-                      <option value="Active">Active</option>
-                      <option value="Inactive">Inactive</option>
-                    </select>
-                  </div>
+                <div>
+  <label className="block text-sm font-medium text-gray-700 mb-2">Status</label>
+  <select
+    value={leadForm.status}
+    onChange={(e) => setLeadForm({ ...leadForm, status: e.target.value as 'New' | 'Open' | 'Important' })}
+    className="w-full px-4 py-3 border-2 border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
+  >
+    <option value="New">New</option>
+    <option value="Open">Open</option>
+    <option value="Important">Important</option>
+  </select>
+</div>
                 </div>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>
@@ -1399,16 +1410,16 @@ export default function LeadManagement() {
                         <span className="font-semibold">Company:</span> {selectedLead.company}
                       </p>
                     )}
-                    <p className="text-sm text-gray-700 mb-2">
-                      <span className="font-semibold">Status:</span> 
-                      <span className={`ml-2 px-3 py-1 rounded-full text-xs font-bold ${
-                        selectedLead?.status === 'Active' 
-                          ? 'bg-green-500 text-white' 
-                          : 'bg-gray-400 text-white'
-                      }`}>
-                        {selectedLead?.status}
-                      </span>
-                    </p>
+                <p className="text-sm text-gray-700 mb-2">
+  <span className="font-semibold">Status:</span> 
+  <span className={`ml-2 px-3 py-1 rounded-full text-xs font-bold ${
+    selectedLead?.status === 'New' ? 'bg-blue-500 text-white' :
+    selectedLead?.status === 'Open' ? 'bg-green-500 text-white' :
+    'bg-orange-500 text-white'
+  }`}>
+    {selectedLead?.status}
+  </span>
+</p>
                     <p className="text-sm text-gray-700 mb-2">
                       <span className="font-semibold">Report Generated:</span> {new Date().toLocaleString()}
                     </p>
