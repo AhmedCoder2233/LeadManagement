@@ -1,8 +1,7 @@
-
 'use client';
 
 import { createClient } from '@supabase/supabase-js';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import html2canvas from 'html2canvas';
 import jsPDF from 'jspdf';
 import Image from 'next/image';
@@ -119,6 +118,15 @@ export default function LeadManagement() {
     due_date: ''
   });
 
+  // Fetch all data with useCallback to prevent infinite re-renders
+  const fetchAllData = useCallback(async () => {
+    if (!user) return;
+    
+    await fetchLeads();
+    await fetchFollowUps();
+    await fetchTasks();
+  }, [user]);
+
   useEffect(() => {
     initializeAuth();
   }, []);
@@ -132,12 +140,10 @@ export default function LeadManagement() {
 
   useEffect(() => {
     if (user) {
-      fetchLeads();
-      fetchFollowUps();
-      fetchTasks();
+      fetchAllData();
       setupRealtimeSubscriptions();
     }
-  }, [user]);
+  }, [user, fetchAllData]);
 
   const initializeAuth = async () => {
     try {
@@ -224,8 +230,9 @@ export default function LeadManagement() {
           table: 'leads',
           filter: `user_id=eq.${user.id}`
         },
-        () => {
-          fetchLeads();
+        (payload) => {
+          console.log('Lead change detected:', payload);
+          fetchAllData();
         }
       )
       .subscribe();
@@ -240,8 +247,9 @@ export default function LeadManagement() {
           table: 'follow_ups',
           filter: `user_id=eq.${user.id}`
         },
-        () => {
-          fetchFollowUps();
+        (payload) => {
+          console.log('Follow-up change detected:', payload);
+          fetchAllData();
         }
       )
       .subscribe();
@@ -256,8 +264,9 @@ export default function LeadManagement() {
           table: 'tasks',
           filter: `user_id=eq.${user.id}`
         },
-        () => {
-          fetchTasks();
+        (payload) => {
+          console.log('Task change detected:', payload);
+          fetchAllData();
         }
       )
       .subscribe();
@@ -331,124 +340,124 @@ export default function LeadManagement() {
     }
   };
 
- const fetchFollowUps = async () => {
-  if (!user) return;
+  const fetchFollowUps = async () => {
+    if (!user) return;
 
-  try {
-    // First, fetch all follow-ups for this user
-    const { data: followUpsData, error: followUpsError } = await supabase
-      .from('follow_ups')
-      .select('*, leads(full_name, email)')
-      .eq('user_id', user.id)
-      .eq('completed', false)
-      .order('follow_up_date', { ascending: true });
-
-    if (followUpsError) {
-      console.error('Follow-ups fetch error:', followUpsError);
-      return;
-    }
-
-    if (followUpsData) {
-      // Sort follow-ups: latest date first, but overdue ones at the bottom
-      const sortedFollowUps = followUpsData.sort((a, b) => {
-        const dateA = new Date(a.follow_up_date);
-        const dateB = new Date(b.follow_up_date);
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-        
-        // If both are overdue, show the most recent overdue first
-        if (dateA < today && dateB < today) {
-          return dateB.getTime() - dateA.getTime(); // Most recent overdue first
-        }
-        
-        // If only one is overdue, put it at the end
-        if (dateA < today) return 1; // Put overdue at the bottom
-        if (dateB < today) return -1; // Put future at the top
-        
-        // Both are future dates, sort by closest date first
-        return dateA.getTime() - dateB.getTime();
-      });
-      
-      setFollowUps(sortedFollowUps);
-
-      // Now fetch leads with their follow-ups
-      const { data: leadsData, error: leadsError } = await supabase
-        .from('leads')
-        .select('*, follow_ups!inner(*)')
+    try {
+      // Fetch all pending follow-ups
+      const { data: followUpsData, error: followUpsError } = await supabase
+        .from('follow_ups')
+        .select('*, leads(full_name, email)')
         .eq('user_id', user.id)
-        .eq('follow_ups.completed', false)
-        .eq('follow_ups.user_id', user.id);
+        .eq('completed', false)
+        .order('follow_up_date', { ascending: true });
 
-      if (leadsError) {
-        console.error('Leads with follow-ups fetch error:', leadsError);
+      if (followUpsError) {
+        console.error('Follow-ups fetch error:', followUpsError);
         return;
       }
 
-      if (leadsData) {
-        const leadsWithFollowUpsData = leadsData.map(lead => {
-          // Sort lead's follow-ups: latest date first, overdue last
-          const leadFollowUps = followUpsData
-            .filter(f => f.lead_id === lead.id)
-            .sort((a, b) => {
-              const dateA = new Date(a.follow_up_date);
-              const dateB = new Date(b.follow_up_date);
-              const today = new Date();
-              today.setHours(0, 0, 0, 0);
-              
-              // If both are overdue, show the most recent overdue first
-              if (dateA < today && dateB < today) {
-                return dateB.getTime() - dateA.getTime();
-              }
-              
-              // If only one is overdue, put it at the end
-              if (dateA < today) return 1;
-              if (dateB < today) return -1;
-              
-              // Both are future dates, sort by closest date first
-              return dateA.getTime() - dateB.getTime();
-            });
-          
-          return {
-            ...lead,
-            follow_ups: leadFollowUps
-          };
-        });
-        
-        // Sort leads based on their latest follow-up date
-        leadsWithFollowUpsData.sort((a, b) => {
-          const aLatestFollowUp = a.follow_ups[0]; // Get first (most recent) follow-up
-          const bLatestFollowUp = b.follow_ups[0];
-          
-          if (!aLatestFollowUp && !bLatestFollowUp) return 0;
-          if (!aLatestFollowUp) return 1;
-          if (!bLatestFollowUp) return -1;
-          
-          const dateA = new Date(aLatestFollowUp.follow_up_date);
-          const dateB = new Date(bLatestFollowUp.follow_up_date);
+      if (followUpsData) {
+        // Sort follow-ups for display: upcoming first, past follow-ups at the end
+        const sortedFollowUps = followUpsData.sort((a, b) => {
+          const dateA = new Date(a.follow_up_date);
+          const dateB = new Date(b.follow_up_date);
           const today = new Date();
           today.setHours(0, 0, 0, 0);
           
-          // If both are overdue, show the most recent overdue first
-          if (dateA < today && dateB < today) {
+          const isAPast = dateA < today;
+          const isBPast = dateB < today;
+          
+          // If both are past, show most recent past first
+          if (isAPast && isBPast) {
             return dateB.getTime() - dateA.getTime();
           }
           
-          // If only one is overdue, put it at the end
-          if (dateA < today) return 1;
-          if (dateB < today) return -1;
+          // If both are upcoming, show closest date first
+          if (!isAPast && !isBPast) {
+            return dateA.getTime() - dateB.getTime();
+          }
           
-          // Both are future dates, sort by closest date first
-          return dateA.getTime() - dateB.getTime();
+          // If one is past and one is upcoming, put upcoming first
+          return isAPast ? 1 : -1;
         });
         
-        setLeadsWithFollowUps(leadsWithFollowUpsData);
+        setFollowUps(sortedFollowUps);
+
+        // Now fetch leads with their follow-ups
+        const { data: leadsData, error: leadsError } = await supabase
+          .from('leads')
+          .select('*, follow_ups(*)')
+          .eq('user_id', user.id)
+          .eq('follow_ups.completed', false)
+          .eq('follow_ups.user_id', user.id);
+
+        if (leadsError) {
+          console.error('Leads with follow-ups fetch error:', leadsError);
+          return;
+        }
+
+        if (leadsData) {
+          const leadsWithFollowUpsData = leadsData.map(lead => {
+            // Get lead's follow-ups and sort them properly
+            const leadFollowUps = followUpsData
+              .filter(f => f.lead_id === lead.id)
+              .sort((a, b) => {
+                const dateA = new Date(a.follow_up_date);
+                const dateB = new Date(b.follow_up_date);
+                const today = new Date();
+                today.setHours(0, 0, 0, 0);
+                
+                const isAPast = dateA < today;
+                const isBPast = dateB < today;
+                
+                // Sort: upcoming first, then past
+                if (!isAPast && !isBPast) {
+                  return dateA.getTime() - dateB.getTime(); // Upcoming: closest first
+                }
+                if (isAPast && !isBPast) return 1; // Past after upcoming
+                if (!isAPast && isBPast) return -1; // Upcoming before past
+                return dateB.getTime() - dateA.getTime(); // Both past: most recent first
+              });
+            
+            return {
+              ...lead,
+              follow_ups: leadFollowUps
+            };
+          });
+          
+          // Sort leads based on their follow-ups: leads with upcoming follow-ups first
+          leadsWithFollowUpsData.sort((a, b) => {
+            const aHasUpcoming = a.follow_ups.some((f:any) => new Date(f.follow_up_date) >= new Date());
+            const bHasUpcoming = b.follow_ups.some((f:any) => new Date(f.follow_up_date) >= new Date());
+            
+            // If both have upcoming, sort by closest upcoming date
+            if (aHasUpcoming && bHasUpcoming) {
+              const aNext = a.follow_ups.find((f:any) => new Date(f.follow_up_date) >= new Date());
+              const bNext = b.follow_ups.find((f:any) => new Date(f.follow_up_date) >= new Date());
+              return new Date(aNext?.follow_up_date || 0).getTime() - 
+                     new Date(bNext?.follow_up_date || 0).getTime();
+            }
+            
+            // If only one has upcoming, put it first
+            if (aHasUpcoming && !bHasUpcoming) return -1;
+            if (!aHasUpcoming && bHasUpcoming) return 1;
+            
+            // Both only have past follow-ups, sort by most recent past
+            const aLatest = a.follow_ups[0];
+            const bLatest = b.follow_ups[0];
+            return new Date(bLatest?.follow_up_date || 0).getTime() - 
+                   new Date(aLatest?.follow_up_date || 0).getTime();
+          });
+          
+          setLeadsWithFollowUps(leadsWithFollowUpsData);
+        }
       }
+    } catch (error) {
+      console.error('Fetch follow-ups error:', error);
+      showToast('Error fetching follow-ups', 'error');
     }
-  } catch (error) {
-    console.error('Fetch follow-ups error:', error);
-    showToast('Error fetching follow-ups', 'error');
-  }
-};
+  };
 
   const fetchTasks = async () => {
     if (!user) return;
@@ -508,8 +517,8 @@ export default function LeadManagement() {
       
       if (!error) {
         showToast('Lead updated successfully!', 'success');
-        await fetchLeads();
         resetLeadForm();
+        setTimeout(() => window.location.reload(), 1000); // Force reload after update
       } else {
         console.error('Update lead error:', error);
         showToast(`Failed to update lead: ${error.message}`, 'error');
@@ -538,7 +547,7 @@ export default function LeadManagement() {
       if (!error) {
         resetLeadForm();
         showToast('Lead added successfully!', 'success');
-        await fetchLeads();
+        setTimeout(() => window.location.reload(), 1000); // Force reload after add
       } else {
         console.error('Insert lead error:', error);
         showToast(`Failed to add lead: ${error.message}`, 'error');
@@ -568,6 +577,7 @@ export default function LeadManagement() {
       if (!error) {
         resetFollowUpForm();
         showToast('Follow-up updated successfully!', 'success');
+        setTimeout(() => window.location.reload(), 1000); // Force reload after update
       } else {
         showToast('Failed to update follow-up', 'error');
       }
@@ -581,6 +591,7 @@ export default function LeadManagement() {
       if (!error) {
         resetFollowUpForm();
         showToast('Follow-up scheduled successfully!', 'success');
+        setTimeout(() => window.location.reload(), 1000); // Force reload after add
       } else {
         showToast('Failed to schedule follow-up', 'error');
       }
@@ -609,6 +620,7 @@ export default function LeadManagement() {
       if (!error) {
         resetTaskForm();
         showToast('Task updated successfully!', 'success');
+        setTimeout(() => window.location.reload(), 1000); // Force reload after update
       } else {
         showToast('Failed to update task', 'error');
       }
@@ -622,6 +634,7 @@ export default function LeadManagement() {
       if (!error) {
         resetTaskForm();
         showToast('Task created successfully!', 'success');
+        setTimeout(() => window.location.reload(), 1000); // Force reload after add
       } else {
         showToast('Failed to create task', 'error');
       }
@@ -642,6 +655,7 @@ export default function LeadManagement() {
     
     if (!error) {
       showToast(`Lead status changed to ${formatStatusDisplay(newStatus.toLowerCase())}`, 'success');
+      setTimeout(() => window.location.reload(), 1000); // Force reload after status change
     } else {
       showToast(`Failed to update lead status: ${error.message}`, 'error');
     }
@@ -661,6 +675,7 @@ export default function LeadManagement() {
     
     if (!error) {
       showToast(`Lead ${isActive ? 'activated' : 'deactivated'} successfully!`, 'success');
+      setTimeout(() => window.location.reload(), 1000); // Force reload after active status change
     } else {
       showToast(`Failed to update lead active status: ${error.message}`, 'error');
     }
@@ -676,6 +691,7 @@ export default function LeadManagement() {
       .eq('user_id', user.id);
     if (!error) {
       showToast(task.completed ? 'Task marked as incomplete' : 'Task completed!', 'success');
+      setTimeout(() => window.location.reload(), 1000); // Force reload after task complete
     } else {
       showToast('Failed to update task', 'error');
     }
@@ -691,6 +707,7 @@ export default function LeadManagement() {
       .eq('user_id', user.id);
     if (!error) {
       showToast('Follow-up marked as completed!', 'success');
+      setTimeout(() => window.location.reload(), 1000); // Force reload after follow-up complete
     } else {
       showToast('Failed to complete follow-up', 'error');
     }
@@ -989,7 +1006,7 @@ export default function LeadManagement() {
         if (!error) {
           showToast(`Successfully imported ${importedLeads.length} leads!`, 'success');
           setIsImportModalOpen(false);
-          await fetchLeads();
+          setTimeout(() => window.location.reload(), 1000); // Force reload after import
         } else {
           showToast(`Error importing leads: ${error.message}`, 'error');
         }
@@ -1284,8 +1301,6 @@ export default function LeadManagement() {
           </div>
         )}
 
-        {/* Rest of the JSX remains the same... */}
-        {/* ... */}
         {activeTab === 'active-leads' && (
           <div className="bg-white rounded-2xl shadow-xl p-4 md:p-6">
             <div className="flex justify-between items-center mb-6">
@@ -1360,39 +1375,51 @@ export default function LeadManagement() {
   <div className="bg-white rounded-2xl shadow-xl p-4 md:p-6">
     <div className="flex justify-between items-center mb-6">
       <h2 className="text-2xl md:text-3xl font-bold text-gray-800">Follow-ups</h2>
+      <button
+        onClick={() => setIsFollowUpModalOpen(true)}
+        className="bg-gradient-to-r from-purple-600 to-pink-600 text-white px-4 py-2 rounded-lg hover:from-purple-700 hover:to-pink-700 transition-all hover:scale-105 shadow-md"
+      >
+        + Add Follow-up
+      </button>
     </div>
     <div className="grid gap-4">
       {leadsWithFollowUps.map((leadWithFollowUps, index) => {
-        // Sort follow-ups for display: latest date first, overdue last
-        const sortedFollowUps = leadWithFollowUps.follow_ups.sort((a, b) => {
-          const dateA = new Date(a.follow_up_date);
-          const dateB = new Date(b.follow_up_date);
-          const today = new Date();
-          today.setHours(0, 0, 0, 0);
-          
-          // If both are overdue, show the most recent overdue first
-          if (dateA < today && dateB < today) {
-            return dateB.getTime() - dateA.getTime();
-          }
-          
-          // If only one is overdue, put it at the end
-          if (dateA < today) return 1;
-          if (dateB < today) return -1;
-          
-          // Both are future dates, sort by closest date first
-          return dateA.getTime() - dateB.getTime();
-        });
+        // Get upcoming follow-ups (at least one is upcoming)
+        const upcomingFollowUps = leadWithFollowUps.follow_ups.filter(
+          f => new Date(f.follow_up_date) >= new Date()
+        );
         
-        const latestFollowUp = sortedFollowUps[0]; // Get the most recent one
-        const hasPastFollowUps = sortedFollowUps.some(f => new Date(f.follow_up_date) < new Date());
+        // Get past follow-ups
+        const pastFollowUps = leadWithFollowUps.follow_ups.filter(
+          f => new Date(f.follow_up_date) < new Date()
+        );
+        
+        // Sort upcoming by closest date
+        upcomingFollowUps.sort((a, b) => 
+          new Date(a.follow_up_date).getTime() - new Date(b.follow_up_date).getTime()
+        );
+        
+        // Sort past by most recent first
+        pastFollowUps.sort((a, b) => 
+          new Date(b.follow_up_date).getTime() - new Date(a.follow_up_date).getTime()
+        );
+        
+        // Combine: upcoming first, then past
+        const sortedFollowUps = [...upcomingFollowUps, ...pastFollowUps];
+        
+        const nextFollowUp = sortedFollowUps[0];
+        const hasUpcoming = upcomingFollowUps.length > 0;
+        const hasPast = pastFollowUps.length > 0;
         
         return (
           <div
             key={leadWithFollowUps.id}
             className={`border-2 rounded-xl p-4 md:p-5 hover:shadow-lg transition-all animate-slideUp ${
-              hasPastFollowUps 
+              !hasUpcoming && hasPast 
                 ? 'border-red-200 bg-gradient-to-r from-red-50 to-orange-50' 
-                : 'border-purple-200 bg-gradient-to-r from-purple-50 to-pink-50'
+                : hasUpcoming
+                ? 'border-purple-200 bg-gradient-to-r from-purple-50 to-pink-50'
+                : 'border-gray-200 bg-gray-50'
             }`}
             style={{ animationDelay: `${index * 0.1}s` }}
           >
@@ -1402,9 +1429,19 @@ export default function LeadManagement() {
                   <h3 className="text-lg md:text-xl font-semibold text-gray-900">
                     {leadWithFollowUps.full_name}
                   </h3>
-                  {hasPastFollowUps && (
+                  {!hasUpcoming && hasPast && (
                     <span className="bg-red-500 text-white px-2 py-1 rounded text-xs font-bold">
                       Past Follow-up
+                    </span>
+                  )}
+                  {hasUpcoming && hasPast && (
+                    <span className="bg-yellow-500 text-white px-2 py-1 rounded text-xs font-bold">
+                      Mixed
+                    </span>
+                  )}
+                  {leadWithFollowUps.follow_ups.length > 1 && (
+                    <span className="bg-blue-100 text-blue-800 px-2 py-1 rounded text-xs">
+                      {leadWithFollowUps.follow_ups.length} follow-ups
                     </span>
                   )}
                 </div>
@@ -1413,66 +1450,100 @@ export default function LeadManagement() {
                     <span className="font-medium text-purple-600">📧 Email:</span>{' '}
                     {leadWithFollowUps.email}
                   </p>
-                  <p className="text-sm text-gray-700">
-                    <span className="font-medium text-purple-600">📅 Next Follow-up:</span>{' '}
-                    {new Date(latestFollowUp.follow_up_date).toLocaleDateString()}
-                    {new Date(latestFollowUp.follow_up_date) < new Date() && (
-                      <span className="ml-2 bg-red-100 text-red-800 px-2 py-1 rounded text-xs">
-                        Overdue
-                      </span>
-                    )}
-                    {leadWithFollowUps.follow_ups.length > 1 && (
-                      <span className="ml-2 bg-purple-100 text-purple-800 px-2 py-1 rounded text-xs">
-                        +{leadWithFollowUps.follow_ups.length - 1} more
-                      </span>
-                    )}
-                  </p>
-                  {latestFollowUp.remarks && (
-                    <p className="text-sm text-gray-700">
-                      <span className="font-medium text-purple-600">📝 Remarks:</span> {latestFollowUp.remarks}
-                    </p>
+                  
+                  {nextFollowUp && (
+                    <>
+                      <p className="text-sm text-gray-700">
+                        <span className="font-medium text-purple-600">📅 Next Follow-up:</span>{' '}
+                        {new Date(nextFollowUp.follow_up_date).toLocaleDateString()}
+                        {new Date(nextFollowUp.follow_up_date) < new Date() && (
+                          <span className="ml-2 bg-red-100 text-red-800 px-2 py-1 rounded text-xs">
+                            Overdue
+                          </span>
+                        )}
+                      </p>
+                      {nextFollowUp.remarks && (
+                        <p className="text-sm text-gray-700">
+                          <span className="font-medium text-purple-600">📝 Remarks:</span> {nextFollowUp.remarks}
+                        </p>
+                      )}
+                    </>
                   )}
-                  <p className="text-sm text-gray-700">
-                    <span className="font-medium text-purple-600">📊 Active Status:</span>{' '}
-                    <span className={`px-2 py-1 rounded text-xs font-bold ${
-                      leadWithFollowUps.is_active
-                        ? 'bg-green-500 text-white'
-                        : 'bg-red-500 text-white'
-                    }`}>
-                      {leadWithFollowUps.is_active ? 'Active' : 'Inactive'}
-                    </span>
-                  </p>
+                  
+                  <div className="flex flex-wrap gap-2">
+                    <p className="text-sm text-gray-700">
+                      <span className="font-medium text-purple-600">📊 Status:</span>{' '}
+                      <span className={`px-2 py-1 rounded text-xs font-bold ${
+                        leadWithFollowUps.status === 'new' ? 'bg-blue-500 text-white' :
+                        leadWithFollowUps.status === 'open' ? 'bg-green-500 text-white' :
+                        'bg-orange-500 text-white'
+                      }`}>
+                        {formatStatusDisplay(leadWithFollowUps.status)}
+                      </span>
+                    </p>
+                    <p className="text-sm text-gray-700">
+                      <span className="font-medium text-purple-600">✅ Active:</span>{' '}
+                      <span className={`px-2 py-1 rounded text-xs font-bold ${
+                        leadWithFollowUps.is_active
+                          ? 'bg-green-500 text-white'
+                          : 'bg-red-500 text-white'
+                      }`}>
+                        {leadWithFollowUps.is_active ? 'Active' : 'Inactive'}
+                      </span>
+                    </p>
+                    <p className="text-sm text-gray-700">
+                      <span className="font-medium text-purple-600">📅 Follow-ups:</span>{' '}
+                      <span className="px-2 py-1 rounded text-xs font-bold bg-purple-100 text-purple-800">
+                        {upcomingFollowUps.length} upcoming, {pastFollowUps.length} past
+                      </span>
+                    </p>
+                  </div>
                 </div>
               </div>
               <div className="flex flex-wrap gap-2 w-full md:w-auto">
                 <button
-                  onClick={() => {
-                    setFollowUpForm({ 
-                      ...followUpForm, 
-                      lead_id: leadWithFollowUps.id,
-                      follow_up_date: getTodayDate()
-                    });
-                    setIsFollowUpModalOpen(true);
-                  }}
-                  className="flex-1 md:flex-none bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg text-sm transition-all hover:scale-105 shadow-md"
-                >
-                  Add New
-                </button>
-                <button
                   onClick={() => viewFollowUpHistory(leadWithFollowUps)}
                   className="flex-1 md:flex-none bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg text-sm transition-all hover:scale-105 shadow-md"
                 >
-                  History ({leadWithFollowUps.follow_ups.length})
+                  History 
+                </button>
+                <button
+                  onClick={() => completeFollowUp(nextFollowUp)}
+                  disabled={!nextFollowUp}
+                  className={`flex-1 md:flex-none px-4 py-2 rounded-lg text-sm transition-all hover:scale-105 shadow-md ${
+                    nextFollowUp
+                      ? 'bg-green-600 hover:bg-green-700 text-white'
+                      : 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                  }`}
+                >
+                  Complete
                 </button>
               </div>
             </div>
+            
+            {/* Show additional follow-ups summary */}
+            {leadWithFollowUps.follow_ups.length > 1 && (
+              <div className="mt-4 pt-4 border-t border-gray-200">
+                <p className="text-sm text-gray-600">
+                  <span className="font-medium">Other follow-ups:</span>{' '}
+                  {sortedFollowUps.slice(1).map((f, idx) => (
+                    <span key={f.id} className="ml-2">
+                      {new Date(f.follow_up_date).toLocaleDateString()}
+                      {new Date(f.follow_up_date) < new Date() && ' (past)'}
+                      {idx < sortedFollowUps.length - 2 ? ', ' : ''}
+                    </span>
+                  ))}
+                </p>
+              </div>
+            )}
           </div>
         );
       })}
       {leadsWithFollowUps.length === 0 && (
         <div className="text-center py-16 text-gray-400">
           <div className="text-6xl mb-4">🎉</div>
-          <p className="text-xl">No upcoming follow-ups</p>
+          <p className="text-xl">No follow-ups scheduled</p>
+          <p className="text-gray-500 mt-2">Add follow-ups to active leads</p>
         </div>
       )}
     </div>
@@ -1890,7 +1961,9 @@ export default function LeadManagement() {
                         <tr
                           key={history.id}
                           className={`hover:bg-gray-50 transition-all animate-fadeIn ${
-                            history.completed ? 'bg-green-50' : ''
+                            history.completed ? 'bg-green-50' : 
+                            new Date(history.follow_up_date) < new Date() ? 'bg-red-50' : 
+                            'bg-yellow-50'
                           }`}
                           style={{ animationDelay: `${index * 0.05}s` }}
                         >
@@ -1899,6 +1972,11 @@ export default function LeadManagement() {
                           </td>
                           <td className="px-4 py-3 text-sm text-gray-700">
                             {new Date(history.follow_up_date).toLocaleDateString()}
+                            {new Date(history.follow_up_date) < new Date() && !history.completed && (
+                              <span className="ml-2 bg-red-100 text-red-800 px-2 py-1 rounded text-xs font-bold">
+                                Past Due
+                              </span>
+                            )}
                           </td>
                           <td className="px-4 py-3 text-sm text-gray-700">
                             {history.remarks || '-'}
@@ -1908,10 +1986,13 @@ export default function LeadManagement() {
                               className={`px-3 py-1 rounded-full text-xs font-bold ${
                                 history.completed
                                   ? 'bg-green-500 text-white'
+                                  : new Date(history.follow_up_date) < new Date()
+                                  ? 'bg-red-500 text-white'
                                   : 'bg-yellow-500 text-white'
                               }`}
                             >
-                              {history.completed ? 'Completed' : 'Pending'}
+                              {history.completed ? 'Completed' : 
+                               new Date(history.follow_up_date) < new Date() ? 'Past Due' : 'Pending'}
                             </span>
                           </td>
                           <td className="px-4 py-3 text-sm text-gray-700">
