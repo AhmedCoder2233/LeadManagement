@@ -5,6 +5,7 @@ import { useEffect, useState, useCallback } from 'react';
 import html2canvas from 'html2canvas';
 import jsPDF from 'jspdf';
 import Image from 'next/image';
+import * as XLSX from 'xlsx';
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -974,53 +975,244 @@ export default function LeadManagement() {
     showToast('Excel file exported successfully!', 'success');
   };
 
-  const handleFileImport = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
 
+// Helper function to read file as text
+const readFileAsText = (file: File): Promise<string> => {
+  return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onload = async (event) => {
-      const text = event.target?.result as string;
-      const lines = text.split('\n');
-      const headers = lines[0].split(',').map((h) => h.trim().replace(/"/g, ''));
+    reader.onload = (event) => resolve(event.target?.result as string);
+    reader.onerror = (error) => reject(error);
+    reader.readAsText(file, 'UTF-8');
+  });
+};
 
-      const importedLeads = [];
-      for (let i = 1; i < lines.length; i++) {
-        if (!lines[i].trim()) continue;
-        const values = lines[i].match(/(".*?"|[^,]+)(?=\s*,|\s*$)/g)?.map((v) => v.trim().replace(/^"|"$/g, '')) || [];
+// Parse CSV line with better handling
+const parseCSVLine = (line: string): string[] => {
+  try {
+    // Remove any problematic Unicode characters
+    const cleanLine = line.replace(/[\u0000-\u001F\u007F-\u009F]/g, '');
+    
+    // Try to parse with regex for quoted fields
+    const matches = cleanLine.match(/(".*?"|[^",\t]+)(?=\s*[,|\t]\s*|$)/g);
+    
+    if (matches) {
+      return matches.map(value => {
+        // Remove quotes and trim
+        let cleaned = value.trim();
+        if (cleaned.startsWith('"') && cleaned.endsWith('"')) {
+          cleaned = cleaned.slice(1, -1);
+        }
+        // Replace escaped quotes
+        cleaned = cleaned.replace(/""/g, '"');
+        // Remove any remaining special characters
+        cleaned = cleaned.replace(/[\u0000-\u001F\u007F-\u009F\\]/g, '');
+        return cleaned;
+      });
+    }
+    
+    // Fallback: split by comma or tab
+    if (line.includes('\t')) {
+      return line.split('\t').map(v => v.trim().replace(/^"|"$/g, ''));
+    }
+    
+    return line.split(',').map(v => v.trim().replace(/^"|"$/g, ''));
+    
+  } catch (error) {
+    // Ultimate fallback
+    return line.split(/\s+/).filter(v => v.trim() !== '');
+  }
+};
+
+// Create lead object from CSV values
+const createLeadFromCSVValues = (values: string[], userId?: string): any => {
+  // Ensure we have enough values, pad with empty strings if needed
+  while (values.length < 10) {
+    values.push('');
+  }
+  
+  return {
+    full_name: values[0] || '',
+    email: values[1] || '',
+    phone: values[2] || '',
+    company: values[3] || '',
+    job_title: values[4] || '',
+    location: values[5] || '',
+    source: values[6] || 'Other',
+    status: ((values[7] || 'new').toLowerCase() as 'new' | 'open' | 'important'),
+    is_active: values[8] ? 
+      (values[8].toLowerCase() === 'active' || values[8].toLowerCase() === 'true') : 
+      true,
+    industry: values[9] || '',
+    user_id: userId || '',
+    created_at: new Date().toISOString()
+  };
+};
+
+// Create lead object from Excel values
+const createLeadFromExcelValues = (values: string[], userId?: string): any => {
+  // Ensure we have enough values
+  while (values.length < 10) {
+    values.push('');
+  }
+  
+  return {
+    full_name: values[0] || '',
+    email: values[1] || '',
+    phone: values[2] || '',
+    company: values[3] || '',
+    job_title: values[4] || '',
+    location: values[5] || '',
+    source: values[6] || 'Other',
+    status: ((values[7] || 'new').toLowerCase() as 'new' | 'open' | 'important'),
+    is_active: values[8] ? 
+      (values[8].toLowerCase() === 'active' || values[8].toLowerCase() === 'true') : 
+      true,
+    industry: values[9] || '',
+    user_id: userId || '',
+    created_at: new Date().toISOString()
+  };
+};
+
+// Main import function
+const handleFileImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const file = e.target.files?.[0];
+  if (!file) return;
+
+  // File type check
+  const isExcel = file.name.endsWith('.xlsx') || file.name.endsWith('.xls');
+  const isCSV = file.name.endsWith('.csv');
+  
+  if (!isExcel && !isCSV) {
+    showToast('Please upload CSV or Excel file only', 'error');
+    return;
+  }
+
+  try {
+    showToast('Processing import...', 'info');
+    const importedLeads = [];
+    
+    if (isCSV) {
+      // CSV handling
+      const text = await readFileAsText(file);
+      const lines = text.split('\n').filter(line => line.trim() !== '');
+      
+      if (lines.length === 0) {
+        showToast('No data found in CSV file', 'error');
+        return;
+      }
+
+      // Check if first line contains headers
+      const firstLine = lines[0].toLowerCase();
+      const hasHeaders = firstLine.includes('full_name') || 
+                        firstLine.includes('name') || 
+                        firstLine.includes('email') ||
+                        firstLine.includes('full name');
+      
+      const startIndex = hasHeaders ? 1 : 0;
+
+      for (let i = startIndex; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if (!line) continue;
+        
+        const values = parseCSVLine(line);
         
         if (values.length >= 2) {
-          const lead = {
-            full_name: values[0] || '',
-            email: values[1] || '',
-            phone: values[2] || '',
-            company: values[3] || '',
-            job_title: values[4] || '',
-            location: values[5] || '',
-            source: values[6] || 'Other',
-            status: (values[7]?.toLowerCase() || 'new') as 'new' | 'open' | 'important',
-            is_active: values[8]?.toLowerCase() === 'active' || true,
-            industry: values[9] || '',
-            user_id: user?.id || '',
-            created_at: new Date().toISOString()
-          };
-          importedLeads.push(lead);
+          const lead = createLeadFromCSVValues(values, user?.id);
+          
+          // Validate required fields
+          if (lead.full_name && lead.email) {
+            importedLeads.push(lead);
+          }
         }
+      }
+      
+    } else if (isExcel) {
+      // EXCEL handling using xlsx library
+      const arrayBuffer = await file.arrayBuffer();
+      const workbook = XLSX.read(arrayBuffer, { type: 'array' });
+      
+      // Get first worksheet
+      const firstSheetName = workbook.SheetNames[0];
+      const worksheet = workbook.Sheets[firstSheetName];
+      
+      // Convert to JSON array
+      const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
+      
+      if (jsonData.length === 0) {
+        showToast('No data found in Excel file', 'error');
+        return;
       }
 
-      if (importedLeads.length > 0 && user) {
-        const { error } = await supabase.from('leads').insert(importedLeads);
-        if (!error) {
-          showToast(`Successfully imported ${importedLeads.length} leads!`, 'success');
-          setIsImportModalOpen(false);
-          fetchAllData();
-        } else {
-          showToast(`Error importing leads: ${error.message}`, 'error');
+      // Determine if first row is header
+      const firstRow = jsonData[0] as any[];
+      const hasHeaders = firstRow && (
+        (firstRow[0] && firstRow[0].toString().toLowerCase().includes('name')) ||
+        (firstRow[1] && firstRow[1].toString().toLowerCase().includes('email'))
+      );
+      
+      const startIndex = hasHeaders ? 1 : 0;
+
+      for (let i = startIndex; i < jsonData.length; i++) {
+        const row = jsonData[i] as any[];
+        if (!row || row.length === 0) continue;
+        
+        // Convert row to string values
+        const values = row.map(cell => {
+          if (cell === null || cell === undefined) return '';
+          return cell.toString().trim();
+        });
+        
+        if (values.length >= 2 && values[0] && values[1]) {
+          const lead = createLeadFromExcelValues(values, user?.id);
+          
+          if (lead.full_name && lead.email) {
+            importedLeads.push(lead);
+          }
         }
       }
-    };
-    reader.readAsText(file);
-  };
+    }
+
+    if (importedLeads.length > 0 && user) {
+      // Insert in batches to avoid timeout
+      const batchSize = 50;
+      let importedCount = 0;
+      let errorCount = 0;
+      
+      for (let i = 0; i < importedLeads.length; i += batchSize) {
+        const batch = importedLeads.slice(i, i + batchSize);
+        const { error } = await supabase.from('leads').insert(batch);
+        
+        if (error) {
+          console.error('Import batch error:', error);
+          errorCount++;
+          // Continue with next batch even if one fails
+          continue;
+        }
+        
+        importedCount += batch.length;
+      }
+      
+      if (errorCount > 0) {
+        showToast(`Imported ${importedCount} leads with ${errorCount} errors`, 'info');
+      } else {
+        showToast(`Successfully imported ${importedCount} leads!`, 'success');
+      }
+      
+      setIsImportModalOpen(false);
+      await fetchAllData();
+      
+      // Reset file input
+      if (e.target) {
+        e.target.value = '';
+      }
+    } else {
+      showToast('No valid leads found in file. Make sure file has at least Name and Email columns.', 'error');
+    }
+  } catch (error: any) {
+    console.error('Import processing error:', error);
+    showToast(`Failed to process file: ${error.message}`, 'error');
+  }
+};
 
   // Filter follow-ups when filter changes
   useEffect(() => {
