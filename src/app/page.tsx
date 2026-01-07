@@ -341,124 +341,210 @@ export default function LeadManagement() {
   };
 
   const fetchFollowUps = async () => {
-    if (!user) return;
+  if (!user) return;
 
-    try {
-      // Fetch all pending follow-ups
-      const { data: followUpsData, error: followUpsError } = await supabase
-        .from('follow_ups')
-        .select('*, leads(full_name, email)')
+  try {
+    // Fetch all pending follow-ups
+    const { data: followUpsData, error: followUpsError } = await supabase
+      .from('follow_ups')
+      .select('*, leads(full_name, email)')
+      .eq('user_id', user.id)
+      .eq('completed', false)
+      .order('follow_up_date', { ascending: true });
+
+    if (followUpsError) {
+      console.error('Follow-ups fetch error:', followUpsError);
+      return;
+    }
+
+    if (followUpsData) {
+      // Sort follow-ups for display: today's follow-ups first, then upcoming, then past
+      const sortedFollowUps = followUpsData.sort((a, b) => {
+        const dateA = new Date(a.follow_up_date);
+        const dateB = new Date(b.follow_up_date);
+        const today = new Date();
+        
+        // Reset time parts to compare only dates
+        const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+        const dateAOnly = new Date(dateA.getFullYear(), dateA.getMonth(), dateA.getDate());
+        const dateBOnly = new Date(dateB.getFullYear(), dateB.getMonth(), dateB.getDate());
+        
+        // Check if dates are today
+        const isAToday = dateAOnly.getTime() === todayStart.getTime();
+        const isBToday = dateBOnly.getTime() === todayStart.getTime();
+        
+        // If both are today, keep original order (closest time first)
+        if (isAToday && isBToday) {
+          return dateA.getTime() - dateB.getTime();
+        }
+        
+        // If one is today and one is not, put today first
+        if (isAToday && !isBToday) return -1;
+        if (!isAToday && isBToday) return 1;
+        
+        // Check if dates are upcoming (future dates)
+        const isAFuture = dateAOnly > todayStart;
+        const isBFuture = dateBOnly > todayStart;
+        
+        // If both are future dates, show closest date first
+        if (isAFuture && isBFuture) {
+          return dateA.getTime() - dateB.getTime();
+        }
+        
+        // If one is future and one is past, put future first
+        if (isAFuture && !isBFuture) return -1;
+        if (!isAFuture && isBFuture) return 1;
+        
+        // Both are past dates (but not today), show most recent past first
+        return dateB.getTime() - dateA.getTime();
+      });
+      
+      setFollowUps(sortedFollowUps);
+
+      // Now fetch leads with their follow-ups
+      const { data: leadsData, error: leadsError } = await supabase
+        .from('leads')
+        .select('*, follow_ups(*)')
         .eq('user_id', user.id)
-        .eq('completed', false)
-        .order('follow_up_date', { ascending: true });
+        .eq('follow_ups.completed', false)
+        .eq('follow_ups.user_id', user.id);
 
-      if (followUpsError) {
-        console.error('Follow-ups fetch error:', followUpsError);
+      if (leadsError) {
+        console.error('Leads with follow-ups fetch error:', leadsError);
         return;
       }
 
-      if (followUpsData) {
-        // Sort follow-ups for display: upcoming first, past follow-ups at the end
-        const sortedFollowUps = followUpsData.sort((a, b) => {
-          const dateA = new Date(a.follow_up_date);
-          const dateB = new Date(b.follow_up_date);
-          const today = new Date();
-          today.setHours(0, 0, 0, 0);
+      if (leadsData) {
+        const leadsWithFollowUpsData = leadsData.map(lead => {
+          // Get lead's follow-ups and sort them properly
+          const leadFollowUps = followUpsData
+            .filter(f => f.lead_id === lead.id)
+            .sort((a, b) => {
+              const dateA = new Date(a.follow_up_date);
+              const dateB = new Date(b.follow_up_date);
+              const today = new Date();
+              const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+              const dateAOnly = new Date(dateA.getFullYear(), dateA.getMonth(), dateA.getDate());
+              const dateBOnly = new Date(dateB.getFullYear(), dateB.getMonth(), dateB.getDate());
+              
+              // Check if dates are today
+              const isAToday = dateAOnly.getTime() === todayStart.getTime();
+              const isBToday = dateBOnly.getTime() === todayStart.getTime();
+              
+              // Today's follow-ups first
+              if (isAToday && !isBToday) return -1;
+              if (!isAToday && isBToday) return 1;
+              
+              // Check if dates are future
+              const isAFuture = dateAOnly > todayStart;
+              const isBFuture = dateBOnly > todayStart;
+              
+              // Future dates before past dates
+              if (isAFuture && !isBFuture) return -1;
+              if (!isAFuture && isBFuture) return 1;
+              
+              // If both are future or both are past, sort by date
+              if (isAFuture && isBFuture) {
+                return dateA.getTime() - dateB.getTime(); // Future: closest first
+              }
+              
+              // Both are past (but not today), most recent first
+              return dateB.getTime() - dateA.getTime();
+            });
           
-          const isAPast = dateA < today;
-          const isBPast = dateB < today;
-          
-          // If both are past, show most recent past first
-          if (isAPast && isBPast) {
-            return dateB.getTime() - dateA.getTime();
-          }
-          
-          // If both are upcoming, show closest date first
-          if (!isAPast && !isBPast) {
-            return dateA.getTime() - dateB.getTime();
-          }
-          
-          // If one is past and one is upcoming, put upcoming first
-          return isAPast ? 1 : -1;
+          return {
+            ...lead,
+            follow_ups: leadFollowUps
+          };
         });
         
-        setFollowUps(sortedFollowUps);
-
-        // Now fetch leads with their follow-ups
-        const { data: leadsData, error: leadsError } = await supabase
-          .from('leads')
-          .select('*, follow_ups(*)')
-          .eq('user_id', user.id)
-          .eq('follow_ups.completed', false)
-          .eq('follow_ups.user_id', user.id);
-
-        if (leadsError) {
-          console.error('Leads with follow-ups fetch error:', leadsError);
-          return;
-        }
-
-        if (leadsData) {
-          const leadsWithFollowUpsData = leadsData.map(lead => {
-            // Get lead's follow-ups and sort them properly
-            const leadFollowUps = followUpsData
-              .filter(f => f.lead_id === lead.id)
-              .sort((a, b) => {
-                const dateA = new Date(a.follow_up_date);
-                const dateB = new Date(b.follow_up_date);
-                const today = new Date();
-                today.setHours(0, 0, 0, 0);
-                
-                const isAPast = dateA < today;
-                const isBPast = dateB < today;
-                
-                // Sort: upcoming first, then past
-                if (!isAPast && !isBPast) {
-                  return dateA.getTime() - dateB.getTime(); // Upcoming: closest first
-                }
-                if (isAPast && !isBPast) return 1; // Past after upcoming
-                if (!isAPast && isBPast) return -1; // Upcoming before past
-                return dateB.getTime() - dateA.getTime(); // Both past: most recent first
-              });
-            
-            return {
-              ...lead,
-              follow_ups: leadFollowUps
-            };
+        // Sort leads based on their follow-ups: leads with today's follow-ups first
+        leadsWithFollowUpsData.sort((a, b) => {
+          const today = new Date();
+          const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+          
+          const aHasToday = a.follow_ups.some((f: any) => {
+            const followUpDate = new Date(f.follow_up_date);
+            const followUpDateOnly = new Date(followUpDate.getFullYear(), followUpDate.getMonth(), followUpDate.getDate());
+            return followUpDateOnly.getTime() === todayStart.getTime();
           });
           
-          // Sort leads based on their follow-ups: leads with upcoming follow-ups first
-          leadsWithFollowUpsData.sort((a, b) => {
-            const aHasUpcoming = a.follow_ups.some((f:any) => new Date(f.follow_up_date) >= new Date());
-            const bHasUpcoming = b.follow_ups.some((f:any) => new Date(f.follow_up_date) >= new Date());
-            
-            // If both have upcoming, sort by closest upcoming date
-            if (aHasUpcoming && bHasUpcoming) {
-              const aNext = a.follow_ups.find((f:any) => new Date(f.follow_up_date) >= new Date());
-              const bNext = b.follow_ups.find((f:any) => new Date(f.follow_up_date) >= new Date());
-              return new Date(aNext?.follow_up_date || 0).getTime() - 
-                     new Date(bNext?.follow_up_date || 0).getTime();
-            }
-            
-            // If only one has upcoming, put it first
-            if (aHasUpcoming && !bHasUpcoming) return -1;
-            if (!aHasUpcoming && bHasUpcoming) return 1;
-            
-            // Both only have past follow-ups, sort by most recent past
-            const aLatest = a.follow_ups[0];
-            const bLatest = b.follow_ups[0];
-            return new Date(bLatest?.follow_up_date || 0).getTime() - 
-                   new Date(aLatest?.follow_up_date || 0).getTime();
+          const bHasToday = b.follow_ups.some((f: any) => {
+            const followUpDate = new Date(f.follow_up_date);
+            const followUpDateOnly = new Date(followUpDate.getFullYear(), followUpDate.getMonth(), followUpDate.getDate());
+            return followUpDateOnly.getTime() === todayStart.getTime();
           });
           
-          setLeadsWithFollowUps(leadsWithFollowUpsData);
-        }
+          // Leads with today's follow-ups first
+          if (aHasToday && !bHasToday) return -1;
+          if (!aHasToday && bHasToday) return 1;
+          
+          // If both have today's follow-ups, sort by time
+          if (aHasToday && bHasToday) {
+            const aNextToday = a.follow_ups.find((f: any) => {
+              const followUpDate = new Date(f.follow_up_date);
+              const followUpDateOnly = new Date(followUpDate.getFullYear(), followUpDate.getMonth(), followUpDate.getDate());
+              return followUpDateOnly.getTime() === todayStart.getTime();
+            });
+            
+            const bNextToday = b.follow_ups.find((f: any) => {
+              const followUpDate = new Date(f.follow_up_date);
+              const followUpDateOnly = new Date(followUpDate.getFullYear(), followUpDate.getMonth(), followUpDate.getDate());
+              return followUpDateOnly.getTime() === todayStart.getTime();
+            });
+            
+            return new Date(aNextToday?.follow_up_date || 0).getTime() - 
+                   new Date(bNextToday?.follow_up_date || 0).getTime();
+          }
+          
+          // Check for upcoming follow-ups (future dates)
+          const aHasUpcoming = a.follow_ups.some((f: any) => {
+            const followUpDate = new Date(f.follow_up_date);
+            const followUpDateOnly = new Date(followUpDate.getFullYear(), followUpDate.getMonth(), followUpDate.getDate());
+            return followUpDateOnly > todayStart;
+          });
+          
+          const bHasUpcoming = b.follow_ups.some((f: any) => {
+            const followUpDate = new Date(f.follow_up_date);
+            const followUpDateOnly = new Date(followUpDate.getFullYear(), followUpDate.getMonth(), followUpDate.getDate());
+            return followUpDateOnly > todayStart;
+          });
+          
+          // If both have upcoming, sort by closest upcoming date
+          if (aHasUpcoming && bHasUpcoming) {
+            const aNext = a.follow_ups.find((f: any) => {
+              const followUpDate = new Date(f.follow_up_date);
+              const followUpDateOnly = new Date(followUpDate.getFullYear(), followUpDate.getMonth(), followUpDate.getDate());
+              return followUpDateOnly > todayStart;
+            });
+            const bNext = b.follow_ups.find((f: any) => {
+              const followUpDate = new Date(f.follow_up_date);
+              const followUpDateOnly = new Date(followUpDate.getFullYear(), followUpDate.getMonth(), followUpDate.getDate());
+              return followUpDateOnly > todayStart;
+            });
+            return new Date(aNext?.follow_up_date || 0).getTime() - 
+                   new Date(bNext?.follow_up_date || 0).getTime();
+          }
+          
+          // If only one has upcoming, put it first
+          if (aHasUpcoming && !bHasUpcoming) return -1;
+          if (!aHasUpcoming && bHasUpcoming) return 1;
+          
+          // Both only have past follow-ups (not today), sort by most recent past
+          const aLatest = a.follow_ups[0];
+          const bLatest = b.follow_ups[0];
+          return new Date(bLatest?.follow_up_date || 0).getTime() - 
+                 new Date(aLatest?.follow_up_date || 0).getTime();
+        });
+        
+        setLeadsWithFollowUps(leadsWithFollowUpsData);
       }
-    } catch (error) {
-      console.error('Fetch follow-ups error:', error);
-      showToast('Error fetching follow-ups', 'error');
     }
-  };
-
+  } catch (error) {
+    console.error('Fetch follow-ups error:', error);
+    showToast('Error fetching follow-ups', 'error');
+  }
+};
   const fetchTasks = async () => {
     if (!user) return;
     
