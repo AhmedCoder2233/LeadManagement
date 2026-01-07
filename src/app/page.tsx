@@ -43,7 +43,12 @@ interface FollowUp {
   completed: boolean;
   created_at: string;
   completed_at?: string;
-  leads?: { full_name: string; email: string };
+  leads?: { 
+    full_name: string; 
+    email: string;
+    is_active?: boolean;
+    status?: string;
+  };
   user_id: string;
 }
 
@@ -62,10 +67,6 @@ interface Toast {
   type: 'success' | 'error' | 'info';
 }
 
-interface LeadWithFollowUps extends Lead {
-  follow_ups: FollowUp[];
-}
-
 interface User {
   id: string;
   email: string;
@@ -76,13 +77,14 @@ interface User {
 export default function LeadManagement() {
   const [activeTab, setActiveTab] = useState('all-leads');
   const [leads, setLeads] = useState<Lead[]>([]);
-  const [leadsWithFollowUps, setLeadsWithFollowUps] = useState<LeadWithFollowUps[]>([]);
   const [followUps, setFollowUps] = useState<FollowUp[]>([]);
+  const [allFollowUps, setAllFollowUps] = useState<FollowUp[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [isLeadModalOpen, setIsLeadModalOpen] = useState(false);
   const [isFollowUpModalOpen, setIsFollowUpModalOpen] = useState(false);
   const [isTaskModalOpen, setIsTaskModalOpen] = useState(false);
   const [isHistoryModalOpen, setIsHistoryModalOpen] = useState(false);
+  const [isFollowUpHistoryModalOpen, setIsFollowUpHistoryModalOpen] = useState(false);
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
   const [selectedLead, setSelectedLead] = useState<Lead | null>(null);
   const [followUpHistory, setFollowUpHistory] = useState<FollowUp[]>([]);
@@ -93,6 +95,9 @@ export default function LeadManagement() {
   const [toast, setToast] = useState<Toast | null>(null);
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
+  const [followUpFilter, setFollowUpFilter] = useState<'all' | 'today'>('all');
+  const [taskFilter, setTaskFilter] = useState<'all' | 'today'>('all');
+  const [selectedLeadForFollowUp, setSelectedLeadForFollowUp] = useState<string>('');
 
   const [leadForm, setLeadForm] = useState({
     full_name: '',
@@ -109,7 +114,8 @@ export default function LeadManagement() {
   const [followUpForm, setFollowUpForm] = useState({
     lead_id: '',
     follow_up_date: '',
-    remarks: ''
+    remarks: '',
+    set_active: true
   });
 
   const [taskForm, setTaskForm] = useState({
@@ -118,12 +124,11 @@ export default function LeadManagement() {
     due_date: ''
   });
 
-  // Fetch all data with useCallback to prevent infinite re-renders
   const fetchAllData = useCallback(async () => {
     if (!user) return;
     
     await fetchLeads();
-    await fetchFollowUps();
+    await fetchAllFollowUps();
     await fetchTasks();
   }, [user]);
 
@@ -161,6 +166,7 @@ export default function LeadManagement() {
             setUser(null);
             setLeads([]);
             setFollowUps([]);
+            setAllFollowUps([]);
             setTasks([]);
           }
           setLoading(false);
@@ -340,211 +346,44 @@ export default function LeadManagement() {
     }
   };
 
-  const fetchFollowUps = async () => {
-  if (!user) return;
+  const fetchAllFollowUps = async () => {
+    if (!user) return;
 
-  try {
-    // Fetch all pending follow-ups
+    try {
     const { data: followUpsData, error: followUpsError } = await supabase
       .from('follow_ups')
-      .select('*, leads(full_name, email)')
+      .select('*, leads(full_name, email, is_active, status)')
       .eq('user_id', user.id)
-      .eq('completed', false)
       .order('follow_up_date', { ascending: true });
 
-    if (followUpsError) {
-      console.error('Follow-ups fetch error:', followUpsError);
-      return;
-    }
 
-    if (followUpsData) {
-      // Sort follow-ups for display: today's follow-ups first, then upcoming, then past
-      const sortedFollowUps = followUpsData.sort((a, b) => {
-        const dateA = new Date(a.follow_up_date);
-        const dateB = new Date(b.follow_up_date);
-        const today = new Date();
-        
-        // Reset time parts to compare only dates
-        const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-        const dateAOnly = new Date(dateA.getFullYear(), dateA.getMonth(), dateA.getDate());
-        const dateBOnly = new Date(dateB.getFullYear(), dateB.getMonth(), dateB.getDate());
-        
-        // Check if dates are today
-        const isAToday = dateAOnly.getTime() === todayStart.getTime();
-        const isBToday = dateBOnly.getTime() === todayStart.getTime();
-        
-        // If both are today, keep original order (closest time first)
-        if (isAToday && isBToday) {
-          return dateA.getTime() - dateB.getTime();
-        }
-        
-        // If one is today and one is not, put today first
-        if (isAToday && !isBToday) return -1;
-        if (!isAToday && isBToday) return 1;
-        
-        // Check if dates are upcoming (future dates)
-        const isAFuture = dateAOnly > todayStart;
-        const isBFuture = dateBOnly > todayStart;
-        
-        // If both are future dates, show closest date first
-        if (isAFuture && isBFuture) {
-          return dateA.getTime() - dateB.getTime();
-        }
-        
-        // If one is future and one is past, put future first
-        if (isAFuture && !isBFuture) return -1;
-        if (!isAFuture && isBFuture) return 1;
-        
-        // Both are past dates (but not today), show most recent past first
-        return dateB.getTime() - dateA.getTime();
-      });
-      
-      setFollowUps(sortedFollowUps);
-
-      // Now fetch leads with their follow-ups
-      const { data: leadsData, error: leadsError } = await supabase
-        .from('leads')
-        .select('*, follow_ups(*)')
-        .eq('user_id', user.id)
-        .eq('follow_ups.completed', false)
-        .eq('follow_ups.user_id', user.id);
-
-      if (leadsError) {
-        console.error('Leads with follow-ups fetch error:', leadsError);
+      if (followUpsError) {
+        console.error('Follow-ups fetch error:', followUpsError);
         return;
       }
 
-      if (leadsData) {
-        const leadsWithFollowUpsData = leadsData.map(lead => {
-          // Get lead's follow-ups and sort them properly
-          const leadFollowUps = followUpsData
-            .filter(f => f.lead_id === lead.id)
-            .sort((a, b) => {
-              const dateA = new Date(a.follow_up_date);
-              const dateB = new Date(b.follow_up_date);
-              const today = new Date();
-              const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-              const dateAOnly = new Date(dateA.getFullYear(), dateA.getMonth(), dateA.getDate());
-              const dateBOnly = new Date(dateB.getFullYear(), dateB.getMonth(), dateB.getDate());
-              
-              // Check if dates are today
-              const isAToday = dateAOnly.getTime() === todayStart.getTime();
-              const isBToday = dateBOnly.getTime() === todayStart.getTime();
-              
-              // Today's follow-ups first
-              if (isAToday && !isBToday) return -1;
-              if (!isAToday && isBToday) return 1;
-              
-              // Check if dates are future
-              const isAFuture = dateAOnly > todayStart;
-              const isBFuture = dateBOnly > todayStart;
-              
-              // Future dates before past dates
-              if (isAFuture && !isBFuture) return -1;
-              if (!isAFuture && isBFuture) return 1;
-              
-              // If both are future or both are past, sort by date
-              if (isAFuture && isBFuture) {
-                return dateA.getTime() - dateB.getTime(); // Future: closest first
-              }
-              
-              // Both are past (but not today), most recent first
-              return dateB.getTime() - dateA.getTime();
-            });
-          
-          return {
-            ...lead,
-            follow_ups: leadFollowUps
-          };
-        });
+      if (followUpsData) {
+        setAllFollowUps(followUpsData);
         
-        // Sort leads based on their follow-ups: leads with today's follow-ups first
-        leadsWithFollowUpsData.sort((a, b) => {
-          const today = new Date();
-          const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-          
-          const aHasToday = a.follow_ups.some((f: any) => {
-            const followUpDate = new Date(f.follow_up_date);
-            const followUpDateOnly = new Date(followUpDate.getFullYear(), followUpDate.getMonth(), followUpDate.getDate());
-            return followUpDateOnly.getTime() === todayStart.getTime();
-          });
-          
-          const bHasToday = b.follow_ups.some((f: any) => {
-            const followUpDate = new Date(f.follow_up_date);
-            const followUpDateOnly = new Date(followUpDate.getFullYear(), followUpDate.getMonth(), followUpDate.getDate());
-            return followUpDateOnly.getTime() === todayStart.getTime();
-          });
-          
-          // Leads with today's follow-ups first
-          if (aHasToday && !bHasToday) return -1;
-          if (!aHasToday && bHasToday) return 1;
-          
-          // If both have today's follow-ups, sort by time
-          if (aHasToday && bHasToday) {
-            const aNextToday = a.follow_ups.find((f: any) => {
-              const followUpDate = new Date(f.follow_up_date);
-              const followUpDateOnly = new Date(followUpDate.getFullYear(), followUpDate.getMonth(), followUpDate.getDate());
-              return followUpDateOnly.getTime() === todayStart.getTime();
-            });
-            
-            const bNextToday = b.follow_ups.find((f: any) => {
-              const followUpDate = new Date(f.follow_up_date);
-              const followUpDateOnly = new Date(followUpDate.getFullYear(), followUpDate.getMonth(), followUpDate.getDate());
-              return followUpDateOnly.getTime() === todayStart.getTime();
-            });
-            
-            return new Date(aNextToday?.follow_up_date || 0).getTime() - 
-                   new Date(bNextToday?.follow_up_date || 0).getTime();
-          }
-          
-          // Check for upcoming follow-ups (future dates)
-          const aHasUpcoming = a.follow_ups.some((f: any) => {
-            const followUpDate = new Date(f.follow_up_date);
-            const followUpDateOnly = new Date(followUpDate.getFullYear(), followUpDate.getMonth(), followUpDate.getDate());
-            return followUpDateOnly > todayStart;
-          });
-          
-          const bHasUpcoming = b.follow_ups.some((f: any) => {
-            const followUpDate = new Date(f.follow_up_date);
-            const followUpDateOnly = new Date(followUpDate.getFullYear(), followUpDate.getMonth(), followUpDate.getDate());
-            return followUpDateOnly > todayStart;
-          });
-          
-          // If both have upcoming, sort by closest upcoming date
-          if (aHasUpcoming && bHasUpcoming) {
-            const aNext = a.follow_ups.find((f: any) => {
-              const followUpDate = new Date(f.follow_up_date);
-              const followUpDateOnly = new Date(followUpDate.getFullYear(), followUpDate.getMonth(), followUpDate.getDate());
-              return followUpDateOnly > todayStart;
-            });
-            const bNext = b.follow_ups.find((f: any) => {
-              const followUpDate = new Date(f.follow_up_date);
-              const followUpDateOnly = new Date(followUpDate.getFullYear(), followUpDate.getMonth(), followUpDate.getDate());
-              return followUpDateOnly > todayStart;
-            });
-            return new Date(aNext?.follow_up_date || 0).getTime() - 
-                   new Date(bNext?.follow_up_date || 0).getTime();
-          }
-          
-          // If only one has upcoming, put it first
-          if (aHasUpcoming && !bHasUpcoming) return -1;
-          if (!aHasUpcoming && bHasUpcoming) return 1;
-          
-          // Both only have past follow-ups (not today), sort by most recent past
-          const aLatest = a.follow_ups[0];
-          const bLatest = b.follow_ups[0];
-          return new Date(bLatest?.follow_up_date || 0).getTime() - 
-                 new Date(aLatest?.follow_up_date || 0).getTime();
-        });
+        // Filter based on selected filter
+        let filteredFollowUps = followUpsData.filter(f => !f.completed);
         
-        setLeadsWithFollowUps(leadsWithFollowUpsData);
+        if (followUpFilter === 'today') {
+          const today = new Date().toISOString().split('T')[0];
+          filteredFollowUps = filteredFollowUps.filter(f => f.follow_up_date === today);
+        }
+        
+        // Only show follow-ups for active leads
+        filteredFollowUps = filteredFollowUps.filter(f => f.leads?.is_active !== false);
+        
+        setFollowUps(filteredFollowUps);
       }
+    } catch (error) {
+      console.error('Fetch follow-ups error:', error);
+      showToast('Error fetching follow-ups', 'error');
     }
-  } catch (error) {
-    console.error('Fetch follow-ups error:', error);
-    showToast('Error fetching follow-ups', 'error');
-  }
-};
+  };
+
   const fetchTasks = async () => {
     if (!user) return;
     
@@ -604,7 +443,7 @@ export default function LeadManagement() {
       if (!error) {
         showToast('Lead updated successfully!', 'success');
         resetLeadForm();
-        setTimeout(() => window.location.reload(), 1000); // Force reload after update
+        fetchAllData();
       } else {
         console.error('Update lead error:', error);
         showToast(`Failed to update lead: ${error.message}`, 'error');
@@ -633,7 +472,7 @@ export default function LeadManagement() {
       if (!error) {
         resetLeadForm();
         showToast('Lead added successfully!', 'success');
-        setTimeout(() => window.location.reload(), 1000); // Force reload after add
+        fetchAllData();
       } else {
         console.error('Insert lead error:', error);
         showToast(`Failed to add lead: ${error.message}`, 'error');
@@ -649,38 +488,65 @@ export default function LeadManagement() {
       return;
     }
     
-    if (new Date(followUpForm.follow_up_date) < new Date(getTodayDate())) {
+    const today = new Date(getTodayDate());
+    const selectedDate = new Date(followUpForm.follow_up_date);
+    
+    if (selectedDate < today) {
       showToast('Follow-up date cannot be in the past!', 'error');
       return;
     }
     
-    if (editingItem) {
-      const { error } = await supabase
-        .from('follow_ups')
-        .update(followUpForm)
-        .eq('id', editingItem.id)
-        .eq('user_id', user.id);
-      if (!error) {
-        resetFollowUpForm();
-        showToast('Follow-up updated successfully!', 'success');
-        setTimeout(() => window.location.reload(), 1000); // Force reload after update
-      } else {
-        showToast('Failed to update follow-up', 'error');
+    // First, check if there's an existing follow-up for this lead
+    const { data: existingFollowUps } = await supabase
+      .from('follow_ups')
+      .select('*')
+      .eq('lead_id', followUpForm.lead_id)
+      .eq('completed', false)
+      .eq('user_id', user.id);
+    
+    try {
+      // Mark existing follow-ups as completed
+      if (existingFollowUps && existingFollowUps.length > 0) {
+        for (const existingFollowUp of existingFollowUps) {
+          await supabase
+            .from('follow_ups')
+            .update({ 
+              completed: true, 
+              completed_at: new Date().toISOString()
+            })
+            .eq('id', existingFollowUp.id)
+            .eq('user_id', user.id);
+        }
       }
-    } else {
+      
+      // Update lead active status
+      await supabase
+        .from('leads')
+        .update({ 
+          is_active: followUpForm.set_active
+        })
+        .eq('id', followUpForm.lead_id)
+        .eq('user_id', user.id);
+      
+      // Add new follow-up
       const { error } = await supabase.from('follow_ups').insert([{
-        ...followUpForm,
+        lead_id: followUpForm.lead_id,
+        follow_up_date: followUpForm.follow_up_date,
+        remarks: followUpForm.remarks,
         user_id: user.id,
         created_at: new Date().toISOString(),
         completed: false
       }]);
+      
       if (!error) {
         resetFollowUpForm();
         showToast('Follow-up scheduled successfully!', 'success');
-        setTimeout(() => window.location.reload(), 1000); // Force reload after add
+        fetchAllData();
       } else {
         showToast('Failed to schedule follow-up', 'error');
       }
+    } catch (error) {
+      showToast('Failed to schedule follow-up', 'error');
     }
   };
 
@@ -706,7 +572,7 @@ export default function LeadManagement() {
       if (!error) {
         resetTaskForm();
         showToast('Task updated successfully!', 'success');
-        setTimeout(() => window.location.reload(), 1000); // Force reload after update
+        fetchAllData();
       } else {
         showToast('Failed to update task', 'error');
       }
@@ -720,7 +586,7 @@ export default function LeadManagement() {
       if (!error) {
         resetTaskForm();
         showToast('Task created successfully!', 'success');
-        setTimeout(() => window.location.reload(), 1000); // Force reload after add
+        fetchAllData();
       } else {
         showToast('Failed to create task', 'error');
       }
@@ -741,7 +607,7 @@ export default function LeadManagement() {
     
     if (!error) {
       showToast(`Lead status changed to ${formatStatusDisplay(newStatus.toLowerCase())}`, 'success');
-      setTimeout(() => window.location.reload(), 1000); // Force reload after status change
+      fetchAllData();
     } else {
       showToast(`Failed to update lead status: ${error.message}`, 'error');
     }
@@ -761,7 +627,7 @@ export default function LeadManagement() {
     
     if (!error) {
       showToast(`Lead ${isActive ? 'activated' : 'deactivated'} successfully!`, 'success');
-      setTimeout(() => window.location.reload(), 1000); // Force reload after active status change
+      fetchAllData();
     } else {
       showToast(`Failed to update lead active status: ${error.message}`, 'error');
     }
@@ -777,7 +643,7 @@ export default function LeadManagement() {
       .eq('user_id', user.id);
     if (!error) {
       showToast(task.completed ? 'Task marked as incomplete' : 'Task completed!', 'success');
-      setTimeout(() => window.location.reload(), 1000); // Force reload after task complete
+      fetchAllData();
     } else {
       showToast('Failed to update task', 'error');
     }
@@ -788,13 +654,18 @@ export default function LeadManagement() {
     
     const { error } = await supabase
       .from('follow_ups')
-      .update({ completed: true, completed_at: new Date().toISOString() })
+      .update({ 
+        completed: true, 
+        completed_at: new Date().toISOString()
+      })
       .eq('id', followUp.id)
       .eq('user_id', user.id);
+    
     if (!error) {
       showToast('Follow-up marked as completed!', 'success');
-      setTimeout(() => window.location.reload(), 1000); // Force reload after follow-up complete
+      fetchAllData();
     } else {
+      console.error('Complete follow-up error:', error);
       showToast('Failed to complete follow-up', 'error');
     }
   };
@@ -805,7 +676,7 @@ export default function LeadManagement() {
     setSelectedLead(lead);
     const { data, error } = await supabase
       .from('follow_ups')
-      .select('*')
+      .select('*, leads(full_name, email)')
       .eq('lead_id', lead.id)
       .eq('user_id', user.id)
       .order('follow_up_date', { ascending: false });
@@ -815,46 +686,81 @@ export default function LeadManagement() {
     }
   };
 
+  const viewFollowUpHistoryForLead = async (leadId: string) => {
+    if (!user) return;
+    
+    const { data: leadData, error: leadError } = await supabase
+      .from('leads')
+      .select('*')
+      .eq('id', leadId)
+      .eq('user_id', user.id)
+      .single();
+    
+    if (leadError || !leadData) return;
+    
+    setSelectedLead(leadData);
+    const { data, error } = await supabase
+      .from('follow_ups')
+      .select('*, leads(full_name, email)')
+      .eq('lead_id', leadId)
+      .eq('user_id', user.id)
+      .order('follow_up_date', { ascending: false });
+    if (!error && data) {
+      setFollowUpHistory(data);
+      setIsHistoryModalOpen(true);
+    }
+  };
+
+  const viewAllFollowUpHistory = async () => {
+    if (!user) return;
+    
+    const { data, error } = await supabase
+      .from('follow_ups')
+      .select('*, leads(full_name, email)')
+      .eq('user_id', user.id)
+      .order('created_at', { ascending: false });
+    if (!error && data) {
+      setFollowUpHistory(data);
+      setIsFollowUpHistoryModalOpen(true);
+    }
+  };
+
   const saveHistoryAsPDF = async () => {
-    if (!selectedLead || followUpHistory.length === 0) return;
+    if (!selectedLead && followUpHistory.length === 0) return;
 
     const element = document.createElement('div');
     element.innerHTML = `
       <div style="font-family: Arial, sans-serif; padding: 20px; max-width: 800px; margin: 0 auto;">
-        <h1 style="color: #1f2937; border-bottom: 3px solid #8b5cf6; padding-bottom: 10px;">
-          Follow-up History - ${selectedLead.full_name}
+        <h1 style="color: #1f2937; border-bottom: 3px solid #000; padding-bottom: 10px;">
+          ${selectedLead ? `Follow-up History - ${selectedLead.full_name}` : 'All Follow-up History'}
         </h1>
         <div style="margin: 20px 0; color: #4b5563;">
-          <strong>Lead Name:</strong> ${selectedLead.full_name}<br>
-          <strong>Email:</strong> ${selectedLead.email}<br>
-          <strong>Company:</strong> ${selectedLead.company || 'N/A'}<br>
-          <strong>Phone:</strong> ${selectedLead.phone || 'N/A'}<br>
-          <strong>Status:</strong> ${formatStatusDisplay(selectedLead.status)}<br>
-          <strong>Active Status:</strong> ${selectedLead.is_active ? 'Active' : 'Inactive'}<br>
+          ${selectedLead ? `
+            <strong>Lead Name:</strong> ${selectedLead.full_name}<br>
+            <strong>Email:</strong> ${selectedLead.email}<br>
+            <strong>Company:</strong> ${selectedLead.company || 'N/A'}<br>
+            <strong>Phone:</strong> ${selectedLead.phone || 'N/A'}<br>
+            <strong>Status:</strong> ${formatStatusDisplay(selectedLead.status)}<br>
+            <strong>Active Status:</strong> ${selectedLead.is_active ? 'Active' : 'Inactive'}<br>
+          ` : ''}
           <strong>Report Generated:</strong> ${new Date().toLocaleString()}
         </div>
         <table style="width: 100%; border-collapse: collapse; margin-top: 20px;">
           <thead>
-            <tr style="background-color: #8b5cf6; color: white;">
+            <tr style="background-color: #000; color: white;">
+              <th style="padding: 12px; text-align: left;">Lead Name</th>
               <th style="padding: 12px; text-align: left;">Date Added</th>
               <th style="padding: 12px; text-align: left;">Follow-up Date</th>
               <th style="padding: 12px; text-align: left;">Remarks</th>
-              <th style="padding: 12px; text-align: left;">Status</th>
-              <th style="padding: 12px; text-align: left;">Completed Date</th>
             </tr>
           </thead>
           <tbody>
             ${followUpHistory.map(h => `
               <tr style="border-bottom: 1px solid #e5e7eb;">
+                <td style="padding: 10px;">${h.leads?.full_name || 'N/A'}</td>
                 <td style="padding: 10px;">${new Date(h.created_at).toLocaleDateString()}</td>
                 <td style="padding: 10px;">${new Date(h.follow_up_date).toLocaleDateString()}</td>
                 <td style="padding: 10px;">${h.remarks || '-'}</td>
-                <td style="padding: 10px;">
-                  <span style="padding: 4px 8px; border-radius: 4px; font-size: 12px; font-weight: bold; ${h.completed ? 'background-color: #10b981; color: white;' : 'background-color: #f59e0b; color: white;'}">
-                    ${h.completed ? 'Completed' : 'Pending'}
-                  </span>
-                </td>
-                <td style="padding: 10px;">${h.completed_at ? new Date(h.completed_at).toLocaleDateString() : '-'}</td>
               </tr>
             `).join('')}
           </tbody>
@@ -884,7 +790,11 @@ export default function LeadManagement() {
         heightLeft -= pageHeight;
       }
 
-      pdf.save(`FollowUpHistory_${selectedLead.full_name}_${new Date().toISOString().split('T')[0]}.pdf`);
+      const fileName = selectedLead 
+        ? `FollowUpHistory_${selectedLead.full_name}_${new Date().toISOString().split('T')[0]}.pdf`
+        : `AllFollowUps_${new Date().toISOString().split('T')[0]}.pdf`;
+      
+      pdf.save(fileName);
       showToast('PDF saved successfully!', 'success');
     } catch (error) {
       showToast('Failed to save PDF', 'error');
@@ -913,8 +823,10 @@ export default function LeadManagement() {
     setFollowUpForm({
       lead_id: '',
       follow_up_date: '',
-      remarks: ''
+      remarks: '',
+      set_active: true
     });
+    setSelectedLeadForFollowUp('');
     setEditingItem(null);
     setIsFollowUpModalOpen(false);
   };
@@ -950,7 +862,8 @@ export default function LeadManagement() {
     setFollowUpForm({
       lead_id: followUp.lead_id,
       follow_up_date: followUp.follow_up_date,
-      remarks: followUp.remarks || ''
+      remarks: followUp.remarks || '',
+      set_active: true
     });
     setIsFollowUpModalOpen(true);
   };
@@ -991,6 +904,14 @@ export default function LeadManagement() {
     }
 
     return filtered;
+  };
+
+  const getFilteredTasks = () => {
+    if (taskFilter === 'today') {
+      const today = new Date().toISOString().split('T')[0];
+      return tasks.filter(task => task.due_date === today);
+    }
+    return tasks;
   };
 
   const exportToCSV = () => {
@@ -1092,7 +1013,7 @@ export default function LeadManagement() {
         if (!error) {
           showToast(`Successfully imported ${importedLeads.length} leads!`, 'success');
           setIsImportModalOpen(false);
-          setTimeout(() => window.location.reload(), 1000); // Force reload after import
+          fetchAllData();
         } else {
           showToast(`Error importing leads: ${error.message}`, 'error');
         }
@@ -1101,14 +1022,32 @@ export default function LeadManagement() {
     reader.readAsText(file);
   };
 
+  // Filter follow-ups when filter changes
+  useEffect(() => {
+    if (allFollowUps.length > 0) {
+      let filtered = allFollowUps.filter(f => !f.completed);
+      
+      if (followUpFilter === 'today') {
+        const today = new Date().toISOString().split('T')[0];
+        filtered = filtered.filter(f => f.follow_up_date === today);
+      }
+      
+      // Only show follow-ups for active leads
+      filtered = filtered.filter(f => f.leads?.is_active !== false);
+      
+      setFollowUps(filtered);
+    }
+  }, [followUpFilter, allFollowUps]);
+
   const filteredLeads = getFilteredAndSortedLeads();
   const activeLeads = filteredLeads.filter(lead => lead.is_active === true);
+  const filteredTasks = getFilteredTasks();
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-gray-50 to-blue-50 flex items-center justify-center">
+      <div className="min-h-screen bg-white flex items-center justify-center">
         <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-black mx-auto mb-4"></div>
           <p className="text-gray-600">Loading...</p>
         </div>
       </div>
@@ -1117,14 +1056,14 @@ export default function LeadManagement() {
 
   if (!user) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-gray-50 to-blue-50 flex items-center justify-center p-4">
-        <div className="max-w-md w-full bg-white rounded-2xl shadow-2xl p-8 text-center">
+      <div className="min-h-screen bg-white flex items-center justify-center p-4">
+        <div className="max-w-md w-full bg-white rounded-lg border border-gray-300 p-8 text-center">
           <h1 className="text-3xl font-bold text-gray-800 mb-2">Lead Management System</h1>
           <p className="text-gray-600 mb-6">Please sign in to access your leads</p>
           
           <button
             onClick={signInWithGoogle}
-            className="w-full bg-white border-2 border-gray-300 hover:border-gray-400 text-gray-700 px-6 py-3 rounded-lg font-medium transition-all hover:shadow-lg flex items-center justify-center gap-3"
+            className="w-full bg-white border border-gray-300 hover:border-gray-400 text-gray-700 px-6 py-3 rounded font-medium transition-all flex items-center justify-center gap-3"
           >
             <svg className="w-5 h-5" viewBox="0 0 24 24">
               <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
@@ -1140,1077 +1079,975 @@ export default function LeadManagement() {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-gray-50 to-blue-50 p-4 md:p-8">
+    <div className="min-h-screen bg-white text-gray-900">
       {toast && (
-        <div className={`fixed top-4 right-4 z-50 px-6 py-4 rounded-xl shadow-2xl animate-slideDown ${
-          toast.type === 'success' ? 'bg-gradient-to-r from-green-500 to-emerald-500' :
-          toast.type === 'error' ? 'bg-gradient-to-r from-red-500 to-pink-500' :
-          'bg-gradient-to-r from-blue-500 to-indigo-500'
-        } text-white font-medium`}>
+        <div className={`fixed top-4 right-4 z-50 px-6 py-3 rounded border ${
+          toast.type === 'success' ? 'bg-green-50 border-green-200 text-green-800' :
+          toast.type === 'error' ? 'bg-red-50 border-red-200 text-red-800' :
+          'bg-blue-50 border-blue-200 text-blue-800'
+        } font-medium`}>
           {toast.message}
         </div>
       )}
 
-      <div className="max-w-7xl mx-auto">
-        <div className="flex justify-between items-center mb-8">
-          <div>
-            <h1 className="text-4xl md:text-5xl font-bold text-gray-800 mb-2">
-              Lead Management System
-            </h1>
-            <p className="text-gray-600">Welcome, {user.full_name || user.email}</p>
-          </div>
-          <div className="flex items-center gap-4">
-            <div className="flex items-center gap-3">
-              {user.avatar_url ? (
-                <div className="relative w-10 h-10 rounded-full overflow-hidden border-2 border-white shadow-lg">
-                  <Image
-                    src={user.avatar_url}
-                    alt={user.full_name || user.email}
-                    fill
-                    className="object-cover"
-                    sizes="40px"
-                  />
-                </div>
-              ) : (
-                <div className="w-10 h-10 rounded-full bg-gradient-to-r from-blue-500 to-indigo-500 flex items-center justify-center text-white font-bold shadow-lg">
-                  {(user.full_name || user.email).charAt(0).toUpperCase()}
-                </div>
-              )}
-              <div className="text-right hidden md:block">
-                <p className="font-medium text-gray-800">{user.full_name || user.email}</p>
-                <p className="text-sm text-gray-500">Sales Representative</p>
-              </div>
+      <div className="flex">
+        {/* Sidebar */}
+        <div className="w-64 border-r border-gray-300 min-h-screen bg-gray-50">
+          <div className="p-6">
+            <h1 className="text-xl font-bold text-gray-900 mb-8">Lead Management</h1>
+            
+            <div className="space-y-1">
+              <button
+                onClick={() => setActiveTab('all-leads')}
+                className={`w-full text-left px-4 py-3 rounded flex items-center gap-3 ${
+                  activeTab === 'all-leads' 
+                    ? 'bg-black text-white' 
+                    : 'text-gray-700 hover:bg-gray-200'
+                }`}
+              >
+                📊 All Leads ({leads.length})
+              </button>
+              
+              <button
+                onClick={() => setActiveTab('active-leads')}
+                className={`w-full text-left px-4 py-3 rounded flex items-center gap-3 ${
+                  activeTab === 'active-leads' 
+                    ? 'bg-black text-white' 
+                    : 'text-gray-700 hover:bg-gray-200'
+                }`}
+              >
+                ✅ Active Leads ({activeLeads.length})
+              </button>
+              
+              <button
+                onClick={() => setActiveTab('followups')}
+                className={`w-full text-left px-4 py-3 rounded flex items-center gap-3 ${
+                  activeTab === 'followups' 
+                    ? 'bg-black text-white' 
+                    : 'text-gray-700 hover:bg-gray-200'
+                }`}
+              >
+                🔔 Follow-ups ({followUps.length})
+              </button>
+              
+              <button
+                onClick={() => setActiveTab('tasks')}
+                className={`w-full text-left px-4 py-3 rounded flex items-center gap-3 ${
+                  activeTab === 'tasks' 
+                    ? 'bg-black text-white' 
+                    : 'text-gray-700 hover:bg-gray-200'
+                }`}
+              >
+                ✓ Tasks ({tasks.filter((t) => !t.completed).length})
+              </button>
             </div>
-            <button
-              onClick={signOut}
-              className="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg transition-all hover:scale-105 shadow-md text-sm md:text-base"
-            >
-              Sign Out
-            </button>
           </div>
         </div>
 
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 md:gap-4 mb-6">
-          <button
-            onClick={() => setActiveTab('all-leads')}
-            className={`p-4 rounded-xl font-semibold transition-all duration-300 ${
-              activeTab === 'all-leads'
-                ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-xl scale-105'
-                : 'bg-white text-gray-700 hover:shadow-lg'
-            }`}
-          >
-            <div className="text-2xl mb-1">📊</div>
-            <div className="text-sm md:text-base">Total Leads</div>
-            <div className="text-lg md:text-xl font-bold">{leads.length}</div>
-          </button>
-          <button
-            onClick={() => setActiveTab('active-leads')}
-            className={`p-4 rounded-xl font-semibold transition-all duration-300 ${
-              activeTab === 'active-leads'
-                ? 'bg-gradient-to-r from-green-600 to-emerald-600 text-white shadow-xl scale-105'
-                : 'bg-white text-gray-700 hover:shadow-lg'
-            }`}
-          >
-            <div className="text-2xl mb-1">✅</div>
-            <div className="text-sm md:text-base">Active Leads</div>
-            <div className="text-lg md:text-xl font-bold">{activeLeads.length}</div>
-          </button>
-          <button
-            onClick={() => setActiveTab('followups')}
-            className={`p-4 rounded-xl font-semibold transition-all duration-300 ${
-              activeTab === 'followups'
-                ? 'bg-gradient-to-r from-purple-600 to-pink-600 text-white shadow-xl scale-105'
-                : 'bg-white text-gray-700 hover:shadow-lg'
-            }`}
-          >
-            <div className="text-2xl mb-1">🔔</div>
-            <div className="text-sm md:text-base">Follow-ups</div>
-            <div className="text-lg md:text-xl font-bold">{followUps.length}</div>
-          </button>
-          <button
-            onClick={() => setActiveTab('tasks')}
-            className={`p-4 rounded-xl font-semibold transition-all duration-300 ${
-              activeTab === 'tasks'
-                ? 'bg-gradient-to-r from-orange-600 to-red-600 text-white shadow-xl scale-105'
-                : 'bg-white text-gray-700 hover:shadow-lg'
-            }`}
-          >
-            <div className="text-2xl mb-1">✓</div>
-            <div className="text-sm md:text-base">Tasks</div>
-            <div className="text-lg md:text-xl font-bold">{tasks.filter((t) => !t.completed).length}</div>
-          </button>
-        </div>
-
-        {activeTab === 'all-leads' && (
-          <div className="bg-white rounded-2xl shadow-xl p-4 md:p-6">
-            <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-6">
-              <h2 className="text-2xl md:text-3xl font-bold text-gray-800">All Leads</h2>
-              <div className="flex flex-wrap gap-2">
-                <button
-                  onClick={() => setIsImportModalOpen(true)}
-                  className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition-all hover:scale-105 shadow-md text-sm md:text-base"
-                >
-                  📥 Import
-                </button>
-                <button
-                  onClick={exportToCSV}
-                  className="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg transition-all hover:scale-105 shadow-md text-sm md:text-base"
-                >
-                  📄 CSV
-                </button>
-                <button
-                  onClick={exportToExcel}
-                  className="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg transition-all hover:scale-105 shadow-md text-sm md:text-base"
-                >
-                  📊 Excel
-                </button>
-                <button
-                  onClick={() => setIsLeadModalOpen(true)}
-                  className="bg-gradient-to-r from-blue-600 to-indigo-600 text-white px-4 py-2 rounded-lg hover:from-blue-700 hover:to-indigo-700 transition-all hover:scale-105 shadow-md text-sm md:text-base"
-                >
-                  + Add Lead
-                </button>
+        {/* Main Content */}
+        <div className="flex-1 p-6">
+          {/* Header */}
+          <div className="flex justify-between items-center mb-8">
+            <div>
+              <h2 className="text-2xl font-bold text-gray-900">
+                {activeTab === 'all-leads' && 'All Leads'}
+                {activeTab === 'active-leads' && 'Active Leads'}
+                {activeTab === 'followups' && 'Follow-ups'}
+                {activeTab === 'tasks' && 'Tasks'}
+              </h2>
+              <p className="text-gray-600">Welcome, {user.full_name || user.email}</p>
+            </div>
+            
+            <div className="flex items-center gap-4">
+              <div className="flex items-center gap-3">
+                {user.avatar_url ? (
+                  <div className="relative w-8 h-8 rounded-full overflow-hidden border border-gray-300">
+                    <Image
+                      src={user.avatar_url}
+                      alt={user.full_name || user.email}
+                      fill
+                      className="object-cover"
+                      sizes="32px"
+                    />
+                  </div>
+                ) : (
+                  <div className="w-8 h-8 rounded-full bg-gray-800 flex items-center justify-center text-white font-bold">
+                    {(user.full_name || user.email).charAt(0).toUpperCase()}
+                  </div>
+                )}
+                <div className="text-right">
+                  <p className="font-medium text-gray-900 text-sm">{user.full_name || user.email}</p>
+                </div>
               </div>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-6">
-              <input
-                type="text"
-                placeholder="🔍 Search leads..."
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-                className="px-4 py-3 border-2 border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
-              />
-              <select
-                value={sourceFilter}
-                onChange={(e) => setSourceFilter(e.target.value)}
-                className="px-4 py-3 border-2 border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
+              <button
+                onClick={signOut}
+                className="bg-gray-800 hover:bg-black text-white px-4 py-2 rounded text-sm"
               >
-                <option value="All">All Sources</option>
-                <option value="Website">Website</option>
-                <option value="Instagram">Instagram</option>
-                <option value="Facebook">Facebook</option>
-                <option value="Cold Call">Cold Call</option>
-                <option value="Other">Other</option>
-              </select>
-              <select
-                value={sortBy}
-                onChange={(e) => setSortBy(e.target.value)}
-                className="px-4 py-3 border-2 border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
-              >
-                <option value="newest">Newest First</option>
-                <option value="oldest">Oldest First</option>
-                <option value="name">Name (A-Z)</option>
-                <option value="company">Company (A-Z)</option>
-              </select>
+                Sign Out
+              </button>
             </div>
+          </div>
 
-            <div className="overflow-x-auto rounded-xl border-2 border-gray-100">
-              <table className="w-full">
-                <thead className="bg-gradient-to-r from-blue-600 to-indigo-600 text-white">
-                  <tr>
-                    <th className="px-4 py-4 text-left text-sm font-semibold">Name</th>
-                    <th className="px-4 py-4 text-left text-sm font-semibold">Email</th>
-                    <th className="px-4 py-4 text-left text-sm font-semibold hidden md:table-cell">Phone</th>
-                    <th className="px-4 py-4 text-left text-sm font-semibold hidden md:table-cell">Company</th>
-                    <th className="px-4 py-4 text-left text-sm font-semibold">Source</th>
-                    <th className="px-4 py-4 text-left text-sm font-semibold">Status</th>
-                    <th className="px-4 py-4 text-left text-sm font-semibold">Is Active</th>
-                    <th className="px-4 py-4 text-left text-sm font-semibold">Actions</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-100">
-                  {filteredLeads.map((lead, index) => (
-                    <tr
-                      key={lead.id}
-                      className="hover:bg-blue-50 transition-all animate-fadeIn"
-                      style={{ animationDelay: `${index * 0.05}s` }}
-                    >
-                      <td className="px-4 py-4 text-sm font-medium text-gray-900">{lead.full_name}</td>
-                      <td className="px-4 py-4 text-sm text-gray-600">{lead.email}</td>
-                      <td className="px-4 py-4 text-sm text-gray-600 hidden md:table-cell">{lead.phone || '-'}</td>
-                      <td className="px-4 py-4 text-sm text-gray-600 hidden md:table-cell">{lead.company || '-'}</td>
-                      <td className="px-4 py-4 text-sm text-gray-600">{lead.source || '-'}</td>
-                      <td className="px-4 py-4">
-                        <select
-                          value={lead.status}
-                          onChange={(e) => updateLeadStatus(lead, e.target.value)}
-                          className={`px-3 py-1 rounded-lg text-xs font-bold cursor-pointer ${
-                            lead.status === 'new' ? 'bg-blue-500 text-white' :
-                            lead.status === 'open' ? 'bg-green-500 text-white' :
-                            'bg-orange-500 text-white'
-                          }`}
-                        >
-                          <option value="new">New</option>
-                          <option value="open">Open</option>
-                          <option value="important">Important</option>
-                        </select>
-                      </td>
-                      <td className="px-4 py-4">
-                        <select
-                          value={lead.is_active ? 'Active' : 'Inactive'}
-                          onChange={(e) => updateLeadActiveStatus(lead, e.target.value === 'Active')}
-                          className={`px-3 py-1 rounded-lg text-xs font-bold cursor-pointer ${
-                            lead.is_active
-                              ? 'bg-green-500 text-white'
-                              : 'bg-red-500 text-white'
-                          }`}
-                        >
-                          <option value="Active">Active</option>
-                          <option value="Inactive">Inactive</option>
-                        </select>
-                      </td>
-                      <td className="px-4 py-4 text-sm">
-                        <button
-                          onClick={() => editLead(lead)}
-                          className="text-blue-600 hover:text-blue-800 font-medium transition-colors mr-3"
-                        >
-                          Edit
-                        </button>
-                        <button
-                          onClick={() => viewFollowUpHistory(lead)}
-                          className="text-purple-600 hover:text-purple-800 font-medium transition-colors"
-                        >
-                          History
-                        </button>
-                      </td>
+          {/* Content Area */}
+          {activeTab === 'all-leads' && (
+            <div className="bg-white border border-gray-300 rounded-lg p-6">
+              <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-6">
+                <h3 className="text-xl font-bold text-gray-900">Lead Management</h3>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    onClick={() => setIsImportModalOpen(true)}
+                    className="border border-gray-300 hover:border-gray-400 text-gray-700 px-4 py-2 rounded text-sm"
+                  >
+                    📥 Import
+                  </button>
+                  <button
+                    onClick={exportToCSV}
+                    className="border border-gray-300 hover:border-gray-400 text-gray-700 px-4 py-2 rounded text-sm"
+                  >
+                    📄 CSV
+                  </button>
+                  <button
+                    onClick={exportToExcel}
+                    className="border border-gray-300 hover:border-gray-400 text-gray-700 px-4 py-2 rounded text-sm"
+                  >
+                    📊 Excel
+                  </button>
+                  <button
+                    onClick={() => setIsLeadModalOpen(true)}
+                    className="bg-black hover:bg-gray-800 text-white px-4 py-2 rounded text-sm"
+                  >
+                    + Add Lead
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-6">
+                <input
+                  type="text"
+                  placeholder="Search leads..."
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                  className="px-4 py-2 border border-gray-300 rounded focus:outline-none focus:border-gray-500"
+                />
+                <select
+                  value={sourceFilter}
+                  onChange={(e) => setSourceFilter(e.target.value)}
+                  className="px-4 py-2 border border-gray-300 rounded focus:outline-none focus:border-gray-500"
+                >
+                  <option value="All">All Sources</option>
+                  <option value="Website">Website</option>
+                  <option value="Instagram">Instagram</option>
+                  <option value="Facebook">Facebook</option>
+                  <option value="Cold Call">Cold Call</option>
+                  <option value="Other">Other</option>
+                </select>
+                <select
+                  value={sortBy}
+                  onChange={(e) => setSortBy(e.target.value)}
+                  className="px-4 py-2 border border-gray-300 rounded focus:outline-none focus:border-gray-500"
+                >
+                  <option value="newest">Newest First</option>
+                  <option value="oldest">Oldest First</option>
+                  <option value="name">Name (A-Z)</option>
+                  <option value="company">Company (A-Z)</option>
+                </select>
+              </div>
+
+              <div className="overflow-x-auto border border-gray-300 rounded">
+                <table className="w-full">
+                  <thead className="bg-gray-100">
+                    <tr>
+                      <th className="px-4 py-3 text-left text-sm font-semibold text-gray-900 border-r border-gray-300">Name</th>
+                      <th className="px-4 py-3 text-left text-sm font-semibold text-gray-900 border-r border-gray-300">Email</th>
+                      <th className="px-4 py-3 text-left text-sm font-semibold text-gray-900 border-r border-gray-300 hidden md:table-cell">Phone</th>
+                      <th className="px-4 py-3 text-left text-sm font-semibold text-gray-900 border-r border-gray-300 hidden md:table-cell">Company</th>
+                      <th className="px-4 py-3 text-left text-sm font-semibold text-gray-900 border-r border-gray-300">Source</th>
+                      <th className="px-4 py-3 text-left text-sm font-semibold text-gray-900 border-r border-gray-300">Status</th>
+                      <th className="px-4 py-3 text-left text-sm font-semibold text-gray-900 border-r border-gray-300">Active</th>
+                      <th className="px-4 py-3 text-left text-sm font-semibold text-gray-900">Actions</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-              {filteredLeads.length === 0 && (
-                <div className="text-center py-12 text-gray-400">
-                  No leads found matching your filters
-                </div>
-              )}
+                  </thead>
+                  <tbody className="divide-y divide-gray-300">
+                    {filteredLeads.map((lead, index) => (
+                      <tr key={lead.id} className="hover:bg-gray-50">
+                        <td className="px-4 py-3 text-sm border-r border-gray-300">{lead.full_name}</td>
+                        <td className="px-4 py-3 text-sm border-r border-gray-300">{lead.email}</td>
+                        <td className="px-4 py-3 text-sm border-r border-gray-300 hidden md:table-cell">{lead.phone || '-'}</td>
+                        <td className="px-4 py-3 text-sm border-r border-gray-300 hidden md:table-cell">{lead.company || '-'}</td>
+                        <td className="px-4 py-3 text-sm border-r border-gray-300">{lead.source || '-'}</td>
+                        <td className="px-4 py-3 text-sm border-r border-gray-300">
+                          <select
+                            value={lead.status}
+                            onChange={(e) => updateLeadStatus(lead, e.target.value)}
+                            className={`px-2 py-1 rounded text-xs border ${
+                              lead.status === 'new' ? 'bg-gray-100' :
+                              lead.status === 'open' ? 'bg-gray-200' :
+                              'bg-gray-300'
+                            }`}
+                          >
+                            <option value="new">New</option>
+                            <option value="open">Open</option>
+                            <option value="important">Important</option>
+                          </select>
+                        </td>
+                        <td className="px-4 py-3 text-sm border-r border-gray-300">
+                          <select
+                            value={lead.is_active ? 'Active' : 'Inactive'}
+                            onChange={(e) => updateLeadActiveStatus(lead, e.target.value === 'Active')}
+                            className={`px-2 py-1 rounded text-xs border ${
+                              lead.is_active ? 'bg-gray-100' : 'bg-gray-200'
+                            }`}
+                          >
+                            <option value="Active">Active</option>
+                            <option value="Inactive">Inactive</option>
+                          </select>
+                        </td>
+                        <td className="px-4 py-3 text-sm">
+                          <button
+                            onClick={() => editLead(lead)}
+                            className="text-gray-700 hover:text-black mr-3 text-sm"
+                          >
+                            Edit
+                          </button>
+                          <button
+                            onClick={() => viewFollowUpHistory(lead)}
+                            className="text-gray-700 hover:text-black text-sm"
+                          >
+                            History
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {filteredLeads.length === 0 && (
+                  <div className="text-center py-12 text-gray-400">
+                    No leads found matching your filters
+                  </div>
+                )}
+              </div>
             </div>
-          </div>
-        )}
+          )}
 
-        {activeTab === 'active-leads' && (
-          <div className="bg-white rounded-2xl shadow-xl p-4 md:p-6">
-            <div className="flex justify-between items-center mb-6">
-              <h2 className="text-2xl md:text-3xl font-bold text-gray-800">Active Leads</h2>
+          {activeTab === 'active-leads' && (
+            <div className="bg-white border border-gray-300 rounded-lg p-6">
+              <div className="flex justify-between items-center mb-6">
+                <h3 className="text-xl font-bold text-gray-900">Active Leads</h3>
+              </div>
+
+              <div className="overflow-x-auto border border-gray-300 rounded">
+                <table className="w-full">
+                  <thead className="bg-gray-100">
+                    <tr>
+                      <th className="px-4 py-3 text-left text-sm font-semibold text-gray-900 border-r border-gray-300">Name</th>
+                      <th className="px-4 py-3 text-left text-sm font-semibold text-gray-900 border-r border-gray-300">Email</th>
+                      <th className="px-4 py-3 text-left text-sm font-semibold text-gray-900 border-r border-gray-300 hidden md:table-cell">Phone</th>
+                      <th className="px-4 py-3 text-left text-sm font-semibold text-gray-900 border-r border-gray-300 hidden md:table-cell">Company</th>
+                      <th className="px-4 py-3 text-left text-sm font-semibold text-gray-900 border-r border-gray-300">Source</th>
+                      <th className="px-4 py-3 text-left text-sm font-semibold text-gray-900 border-r border-gray-300">Status</th>
+                      <th className="px-4 py-3 text-left text-sm font-semibold text-gray-900">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-300">
+                    {activeLeads.map((lead, index) => (
+                      <tr key={lead.id} className="hover:bg-gray-50">
+                        <td className="px-4 py-3 text-sm border-r border-gray-300">{lead.full_name}</td>
+                        <td className="px-4 py-3 text-sm border-r border-gray-300">{lead.email}</td>
+                        <td className="px-4 py-3 text-sm border-r border-gray-300 hidden md:table-cell">{lead.phone || '-'}</td>
+                        <td className="px-4 py-3 text-sm border-r border-gray-300 hidden md:table-cell">{lead.company || '-'}</td>
+                        <td className="px-4 py-3 text-sm border-r border-gray-300">{lead.source || '-'}</td>
+                        <td className="px-4 py-3 text-sm border-r border-gray-300">
+                          <select
+                            value={lead.status}
+                            onChange={(e) => updateLeadStatus(lead, e.target.value)}
+                            className={`px-2 py-1 rounded text-xs border ${
+                              lead.status === 'new' ? 'bg-gray-100' :
+                              lead.status === 'open' ? 'bg-gray-200' :
+                              'bg-gray-300'
+                            }`}
+                          >
+                            <option value="new">New</option>
+                            <option value="open">Open</option>
+                            <option value="important">Important</option>
+                          </select>
+                        </td>
+                        <td className="px-4 py-3 text-sm">
+                          <button
+                            onClick={() => {
+                              setSelectedLeadForFollowUp(lead.id);
+                              setFollowUpForm({ 
+                                ...followUpForm, 
+                                lead_id: lead.id,
+                                set_active: lead.is_active 
+                              });
+                              setIsFollowUpModalOpen(true);
+                            }}
+                            className="bg-black hover:bg-gray-800 text-white px-4 py-2 rounded text-sm"
+                          >
+                            Add Follow-up
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {activeLeads.length === 0 && (
+                  <div className="text-center py-12 text-gray-400">
+                    No active leads found
+                  </div>
+                )}
+              </div>
             </div>
+          )}
 
-            <div className="overflow-x-auto rounded-xl border-2 border-gray-100">
-              <table className="w-full">
-                <thead className="bg-gradient-to-r from-green-600 to-emerald-600 text-white">
-                  <tr>
-                    <th className="px-4 py-4 text-left text-sm font-semibold">Name</th>
-                    <th className="px-4 py-4 text-left text-sm font-semibold">Email</th>
-                    <th className="px-4 py-4 text-left text-sm font-semibold hidden md:table-cell">Phone</th>
-                    <th className="px-4 py-4 text-left text-sm font-semibold hidden md:table-cell">Company</th>
-                    <th className="px-4 py-4 text-left text-sm font-semibold">Source</th>
-                    <th className="px-4 py-4 text-left text-sm font-semibold">Status</th>
-                    <th className="px-4 py-4 text-left text-sm font-semibold">Actions</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-100">
-                  {activeLeads.map((lead, index) => (
-                    <tr
-                      key={lead.id}
-                      className="hover:bg-green-50 transition-all animate-fadeIn"
-                      style={{ animationDelay: `${index * 0.05}s` }}
+          {activeTab === 'followups' && (
+            <div className="bg-white border border-gray-300 rounded-lg p-6">
+              <div className="flex justify-between items-center mb-6">
+                <h3 className="text-xl font-bold text-gray-900">Follow-ups</h3>
+                <div className="flex items-center gap-4">
+                  <div className="flex border border-gray-300 rounded">
+                    <button
+                      onClick={() => setFollowUpFilter('all')}
+                      className={`px-4 py-2 text-sm ${
+                        followUpFilter === 'all' 
+                          ? 'bg-black text-white' 
+                          : 'bg-white text-gray-700 hover:bg-gray-100'
+                      }`}
                     >
-                      <td className="px-4 py-4 text-sm font-medium text-gray-900">{lead.full_name}</td>
-                      <td className="px-4 py-4 text-sm text-gray-600">{lead.email}</td>
-                      <td className="px-4 py-4 text-sm text-gray-600 hidden md:table-cell">{lead.phone || '-'}</td>
-                      <td className="px-4 py-4 text-sm text-gray-600 hidden md:table-cell">{lead.company || '-'}</td>
-                      <td className="px-4 py-4 text-sm text-gray-600">{lead.source || '-'}</td>
-                      <td className="px-4 py-4">
-                        <select
-                          value={lead.status}
-                          onChange={(e) => updateLeadStatus(lead, e.target.value)}
-                          className={`px-3 py-1 rounded-lg text-xs font-bold cursor-pointer ${
-                            lead.status === 'new' ? 'bg-blue-500 text-white' :
-                            lead.status === 'open' ? 'bg-green-500 text-white' :
-                            'bg-orange-500 text-white'
-                          }`}
-                        >
-                          <option value="new">New</option>
-                          <option value="open">Open</option>
-                          <option value="important">Important</option>
-                        </select>
-                      </td>
-                      <td className="px-4 py-4 text-sm">
+                      All
+                    </button>
+                    <button
+                      onClick={() => setFollowUpFilter('today')}
+                      className={`px-4 py-2 text-sm ${
+                        followUpFilter === 'today' 
+                          ? 'bg-black text-white' 
+                          : 'bg-white text-gray-700 hover:bg-gray-100'
+                      }`}
+                    >
+                      Today
+                    </button>
+                  </div>
+                  <button
+                    onClick={() => setIsFollowUpModalOpen(true)}
+                    className="bg-black hover:bg-gray-800 text-white px-4 py-2 rounded text-sm"
+                  >
+                    + Add Follow-up
+                  </button>
+                  <button
+                    onClick={viewAllFollowUpHistory}
+                    className="border border-gray-300 hover:border-gray-400 text-gray-700 px-4 py-2 rounded text-sm"
+                  >
+                    📜 All History
+                  </button>
+                </div>
+              </div>
+
+              <div className="space-y-4">
+                {followUps.map((followUp) => (
+                  <div
+                    key={followUp.id}
+                    className="border border-gray-300 rounded p-4 bg-white"
+                  >
+                    <div className="flex justify-between items-start">
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <h4 className="font-medium text-gray-900">{followUp.leads?.full_name || 'Unknown Lead'}</h4>
+                          <span className={`px-2 py-1 rounded text-xs ${
+                            followUp.leads?.status === 'new' ? 'bg-gray-100 text-gray-700' :
+                            followUp.leads?.status === 'open' ? 'bg-gray-200 text-gray-700' :
+                            'bg-gray-300 text-gray-700'
+                          }`}>
+                            {followUp.leads?.status ? formatStatusDisplay(followUp.leads.status) : 'New'}
+                          </span>
+                        </div>
+                        <p className="text-sm text-gray-600 mt-1">{followUp.leads?.email || 'No email'}</p>
+                        <div className="flex items-center gap-4 mt-2">
+                          <span className="text-sm text-gray-600">
+                            📅 {new Date(followUp.follow_up_date).toLocaleDateString()}
+                          </span>   
+                        </div>
+                        {followUp.remarks && (
+                          <p className="text-sm text-gray-700 mt-2">📝 {followUp.remarks}</p>
+                        )}
+                      </div>
+                      <div className="flex gap-2">
                         <button
                           onClick={() => {
-                            setFollowUpForm({ ...followUpForm, lead_id: lead.id });
+                            setSelectedLeadForFollowUp(followUp.lead_id);
+                            setFollowUpForm({ 
+                              lead_id: followUp.lead_id,
+                              follow_up_date: '',
+                              remarks: '',
+                              set_active: true
+                            });
                             setIsFollowUpModalOpen(true);
                           }}
-                          className="bg-gradient-to-r from-purple-600 to-pink-600 text-white px-4 py-2 rounded-lg hover:from-purple-700 hover:to-pink-700 transition-all hover:scale-105 shadow-md text-xs md:text-sm"
+                          className="border border-gray-300 hover:border-gray-400 text-gray-700 px-3 py-1 rounded text-sm"
                         >
                           Add Follow-up
                         </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              {activeLeads.length === 0 && (
-                <div className="text-center py-12 text-gray-400">
-                  No active leads found
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-
-       {activeTab === 'followups' && (
-  <div className="bg-white rounded-2xl shadow-xl p-4 md:p-6">
-    <div className="flex justify-between items-center mb-6">
-      <h2 className="text-2xl md:text-3xl font-bold text-gray-800">Follow-ups</h2>
-      <button
-        onClick={() => setIsFollowUpModalOpen(true)}
-        className="bg-gradient-to-r from-purple-600 to-pink-600 text-white px-4 py-2 rounded-lg hover:from-purple-700 hover:to-pink-700 transition-all hover:scale-105 shadow-md"
-      >
-        + Add Follow-up
-      </button>
-    </div>
-    <div className="grid gap-4">
-      {leadsWithFollowUps.map((leadWithFollowUps, index) => {
-        // Get upcoming follow-ups (at least one is upcoming)
-        const upcomingFollowUps = leadWithFollowUps.follow_ups.filter(
-          f => new Date(f.follow_up_date) >= new Date()
-        );
-        
-        // Get past follow-ups
-        const pastFollowUps = leadWithFollowUps.follow_ups.filter(
-          f => new Date(f.follow_up_date) < new Date()
-        );
-        
-        // Sort upcoming by closest date
-        upcomingFollowUps.sort((a, b) => 
-          new Date(a.follow_up_date).getTime() - new Date(b.follow_up_date).getTime()
-        );
-        
-        // Sort past by most recent first
-        pastFollowUps.sort((a, b) => 
-          new Date(b.follow_up_date).getTime() - new Date(a.follow_up_date).getTime()
-        );
-        
-        // Combine: upcoming first, then past
-        const sortedFollowUps = [...upcomingFollowUps, ...pastFollowUps];
-        
-        const nextFollowUp = sortedFollowUps[0];
-        const hasUpcoming = upcomingFollowUps.length > 0;
-        const hasPast = pastFollowUps.length > 0;
-        
-        return (
-          <div
-            key={leadWithFollowUps.id}
-            className={`border-2 rounded-xl p-4 md:p-5 hover:shadow-lg transition-all animate-slideUp ${
-              !hasUpcoming && hasPast 
-                ? 'border-red-200 bg-gradient-to-r from-red-50 to-orange-50' 
-                : hasUpcoming
-                ? 'border-purple-200 bg-gradient-to-r from-purple-50 to-pink-50'
-                : 'border-gray-200 bg-gray-50'
-            }`}
-            style={{ animationDelay: `${index * 0.1}s` }}
-          >
-            <div className="flex flex-col md:flex-row justify-between items-start gap-4">
-              <div className="flex-1 w-full">
-                <div className="flex items-center gap-2 mb-2">
-                  <h3 className="text-lg md:text-xl font-semibold text-gray-900">
-                    {leadWithFollowUps.full_name}
-                  </h3>
-                  {!hasUpcoming && hasPast && (
-                    <span className="bg-red-500 text-white px-2 py-1 rounded text-xs font-bold">
-                      Past Follow-up
-                    </span>
-                  )}
-                  {hasUpcoming && hasPast && (
-                    <span className="bg-yellow-500 text-white px-2 py-1 rounded text-xs font-bold">
-                      Mixed
-                    </span>
-                  )}
-                  {leadWithFollowUps.follow_ups.length > 1 && (
-                    <span className="bg-blue-100 text-blue-800 px-2 py-1 rounded text-xs">
-                      {leadWithFollowUps.follow_ups.length} follow-ups
-                    </span>
-                  )}
-                </div>
-                <div className="space-y-2">
-                  <p className="text-sm text-gray-700">
-                    <span className="font-medium text-purple-600">📧 Email:</span>{' '}
-                    {leadWithFollowUps.email}
-                  </p>
-                  
-                  {nextFollowUp && (
-                    <>
-                      <p className="text-sm text-gray-700">
-                        <span className="font-medium text-purple-600">📅 Next Follow-up:</span>{' '}
-                        {new Date(nextFollowUp.follow_up_date).toLocaleDateString()}
-                        {new Date(nextFollowUp.follow_up_date) < new Date() && (
-                          <span className="ml-2 bg-red-100 text-red-800 px-2 py-1 rounded text-xs">
-                            Overdue
-                          </span>
-                        )}
-                      </p>
-                      {nextFollowUp.remarks && (
-                        <p className="text-sm text-gray-700">
-                          <span className="font-medium text-purple-600">📝 Remarks:</span> {nextFollowUp.remarks}
-                        </p>
-                      )}
-                    </>
-                  )}
-                  
-                  <div className="flex flex-wrap gap-2">
-                    <p className="text-sm text-gray-700">
-                      <span className="font-medium text-purple-600">📊 Status:</span>{' '}
-                      <span className={`px-2 py-1 rounded text-xs font-bold ${
-                        leadWithFollowUps.status === 'new' ? 'bg-blue-500 text-white' :
-                        leadWithFollowUps.status === 'open' ? 'bg-green-500 text-white' :
-                        'bg-orange-500 text-white'
-                      }`}>
-                        {formatStatusDisplay(leadWithFollowUps.status)}
-                      </span>
-                    </p>
-                    <p className="text-sm text-gray-700">
-                      <span className="font-medium text-purple-600">✅ Active:</span>{' '}
-                      <span className={`px-2 py-1 rounded text-xs font-bold ${
-                        leadWithFollowUps.is_active
-                          ? 'bg-green-500 text-white'
-                          : 'bg-red-500 text-white'
-                      }`}>
-                        {leadWithFollowUps.is_active ? 'Active' : 'Inactive'}
-                      </span>
-                    </p>
-                    <p className="text-sm text-gray-700">
-                      <span className="font-medium text-purple-600">📅 Follow-ups:</span>{' '}
-                      <span className="px-2 py-1 rounded text-xs font-bold bg-purple-100 text-purple-800">
-                        {upcomingFollowUps.length} upcoming, {pastFollowUps.length} past
-                      </span>
-                    </p>
-                  </div>
-                </div>
-              </div>
-              <div className="flex flex-wrap gap-2 w-full md:w-auto">
-                <button
-                  onClick={() => viewFollowUpHistory(leadWithFollowUps)}
-                  className="flex-1 md:flex-none bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg text-sm transition-all hover:scale-105 shadow-md"
-                >
-                  History 
-                </button>
-                <button
-                  onClick={() => completeFollowUp(nextFollowUp)}
-                  disabled={!nextFollowUp}
-                  className={`flex-1 md:flex-none px-4 py-2 rounded-lg text-sm transition-all hover:scale-105 shadow-md ${
-                    nextFollowUp
-                      ? 'bg-green-600 hover:bg-green-700 text-white'
-                      : 'bg-gray-300 text-gray-500 cursor-not-allowed'
-                  }`}
-                >
-                  Complete
-                </button>
-              </div>
-            </div>
-            
-            {/* Show additional follow-ups summary */}
-            {leadWithFollowUps.follow_ups.length > 1 && (
-              <div className="mt-4 pt-4 border-t border-gray-200">
-                <p className="text-sm text-gray-600">
-                  <span className="font-medium">Other follow-ups:</span>{' '}
-                  {sortedFollowUps.slice(1).map((f, idx) => (
-                    <span key={f.id} className="ml-2">
-                      {new Date(f.follow_up_date).toLocaleDateString()}
-                      {new Date(f.follow_up_date) < new Date() && ' (past)'}
-                      {idx < sortedFollowUps.length - 2 ? ', ' : ''}
-                    </span>
-                  ))}
-                </p>
-              </div>
-            )}
-          </div>
-        );
-      })}
-      {leadsWithFollowUps.length === 0 && (
-        <div className="text-center py-16 text-gray-400">
-          <div className="text-6xl mb-4">🎉</div>
-          <p className="text-xl">No follow-ups scheduled</p>
-          <p className="text-gray-500 mt-2">Add follow-ups to active leads</p>
-        </div>
-      )}
-    </div>
-  </div>
-)}
-
-        {activeTab === 'tasks' && (
-          <div className="bg-white rounded-2xl shadow-xl p-4 md:p-6">
-            <div className="flex justify-between items-center mb-6">
-              <h2 className="text-2xl md:text-3xl font-bold text-gray-800">Tasks</h2>
-              <button
-                onClick={() => setIsTaskModalOpen(true)}
-                className="bg-gradient-to-r from-orange-600 to-red-600 text-white px-4 md:px-6 py-2 rounded-lg hover:from-orange-700 hover:to-red-700 transition-all hover:scale-105 shadow-md text-sm md:text-base"
-              >
-                + Add Task
-              </button>
-            </div>
-            <div className="space-y-4">
-              {tasks.map((task, index) => (
-                <div
-                  key={task.id}
-                  className={`border-2 rounded-xl p-4 md:p-5 transition-all animate-slideUp ${
-                    task.completed
-                      ? 'bg-gray-50 border-gray-300'
-                      : 'border-orange-200 hover:shadow-lg bg-gradient-to-r from-orange-50 to-red-50'
-                  }`}
-                  style={{ animationDelay: `${index * 0.05}s` }}
-                >
-                  <div className="flex items-start space-x-4">
-                    <input
-                      type="checkbox"
-                      checked={task.completed}
-                      onChange={() => toggleTaskComplete(task)}
-                      className="mt-1 w-5 h-5 md:w-6 md:h-6 text-orange-600 rounded-lg cursor-pointer transition-all"
-                    />
-                    <div className="flex-1">
-                      <h3
-                        className={`text-base md:text-lg font-semibold ${
-                          task.completed ? 'line-through text-gray-500' : 'text-gray-900'
-                        }`}
-                      >
-                        {task.title}
-                      </h3>
-                      {task.description && (
-                        <p
-                          className={`text-sm mt-1 ${
-                            task.completed ? 'text-gray-400' : 'text-gray-600'
-                          }`}
+                        <button
+                          onClick={() => viewFollowUpHistoryForLead(followUp.lead_id)}
+                          className="border border-gray-300 hover:border-gray-400 text-gray-700 px-3 py-1 rounded text-sm"
                         >
-                          {task.description}
-                        </p>
-                      )}
-                      <p
-                        className={`text-sm mt-2 ${
-                          task.completed ? 'text-gray-400' : 'text-gray-600'
-                        }`}
-                      >
-                        <span className="font-medium">📅 Due:</span>{' '}
-                        {new Date(task.due_date).toLocaleDateString()}
-                      </p>
+                          📜 History
+                        </button>
+                      </div>
                     </div>
+                  </div>
+                ))}
+                {followUps.length === 0 && (
+                  <div className="text-center py-12 text-gray-400">
+                    <p>No follow-ups found</p>
+                    <p className="text-sm text-gray-500 mt-2">Add follow-ups to active leads</p>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'tasks' && (
+            <div className="bg-white border border-gray-300 rounded-lg p-6">
+              <div className="flex justify-between items-center mb-6">
+                <h3 className="text-xl font-bold text-gray-900">Tasks</h3>
+                <div className="flex items-center gap-4">
+                  <div className="flex border border-gray-300 rounded">
                     <button
-                      onClick={() => editTask(task)}
-                      className="text-blue-600 hover:text-blue-800 font-medium text-sm transition-colors"
+                      onClick={() => setTaskFilter('all')}
+                      className={`px-4 py-2 text-sm ${
+                        taskFilter === 'all' 
+                          ? 'bg-black text-white' 
+                          : 'bg-white text-gray-700 hover:bg-gray-100'
+                      }`}
                     >
-                      Edit
+                      All Tasks
+                    </button>
+                    <button
+                      onClick={() => setTaskFilter('today')}
+                      className={`px-4 py-2 text-sm ${
+                        taskFilter === 'today' 
+                          ? 'bg-black text-white' 
+                          : 'bg-white text-gray-700 hover:bg-gray-100'
+                      }`}
+                    >
+                      Today
                     </button>
                   </div>
-                </div>
-              ))}
-              {tasks.length === 0 && (
-                <div className="text-center py-16 text-gray-400">
-                  <div className="text-6xl mb-4">📝</div>
-                  <p className="text-xl">No tasks yet</p>
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-
-        {isLeadModalOpen && (
-          <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50 backdrop-blur-sm animate-fadeIn">
-            <div className="bg-white rounded-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto p-6 md:p-8 shadow-2xl animate-scaleIn">
-              <h3 className="text-2xl md:text-3xl font-bold mb-6 text-gray-800">
-                {editingItem ? 'Edit Lead' : 'Add New Lead'}
-              </h3>
-              <form onSubmit={addOrUpdateLead} className="space-y-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Full Name <span className="text-red-500">*</span>
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    value={leadForm.full_name}
-                    onChange={(e) => setLeadForm({ ...leadForm, full_name: e.target.value })}
-                    className="w-full px-4 py-3 border-2 border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Email <span className="text-red-500">*</span>
-                  </label>
-                  <input
-                    type="email"
-                    required
-                    value={leadForm.email}
-                    onChange={(e) => setLeadForm({ ...leadForm, email: e.target.value })}
-                    className="w-full px-4 py-3 border-2 border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
-                  />
-                </div>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">Phone</label>
-                    <input
-                      type="tel"
-                      value={leadForm.phone}
-                      onChange={(e) => setLeadForm({ ...leadForm, phone: e.target.value })}
-                      className="w-full px-4 py-3 border-2 border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">Company</label>
-                    <input
-                      type="text"
-                      value={leadForm.company}
-                      onChange={(e) => setLeadForm({ ...leadForm, company: e.target.value })}
-                      className="w-full px-4 py-3 border-2 border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
-                    />
-                  </div>
-                </div>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">Job Title</label>
-                    <input
-                      type="text"
-                      value={leadForm.job_title}
-                      onChange={(e) => setLeadForm({ ...leadForm, job_title: e.target.value })}
-                      className="w-full px-4 py-3 border-2 border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">Location</label>
-                    <input
-                      type="text"
-                      value={leadForm.location}
-                      onChange={(e) => setLeadForm({ ...leadForm, location: e.target.value })}
-                      className="w-full px-4 py-3 border-2 border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
-                    />
-                  </div>
-                </div>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">Source</label>
-                    <select
-                      value={leadForm.source}
-                      onChange={(e) => setLeadForm({ ...leadForm, source: e.target.value })}
-                      className="w-full px-4 py-3 border-2 border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
-                    >
-                      <option value="Website">Website</option>
-                      <option value="Instagram">Instagram</option>
-                      <option value="Facebook">Facebook</option>
-                      <option value="Cold Call">Cold Call</option>
-                      <option value="Other">Other</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">Status</label>
-                    <select
-                      value={leadForm.status}
-                      onChange={(e) => setLeadForm({ ...leadForm, status: e.target.value as any })}
-                      className="w-full px-4 py-3 border-2 border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
-                    >
-                      <option value="new">New</option>
-                      <option value="open">Open</option>
-                      <option value="important">Important</option>
-                    </select>
-                  </div>
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">Industry</label>
-                  <input
-                    type="text"
-                    value={leadForm.industry}
-                    onChange={(e) => setLeadForm({ ...leadForm, industry: e.target.value })}
-                    className="w-full px-4 py-3 border-2 border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
-                  />
-                </div>
-                <div className="flex gap-4 pt-4">
                   <button
-                    type="submit"
-                    className="flex-1 bg-gradient-to-r from-blue-600 to-indigo-600 text-white py-3 rounded-lg hover:from-blue-700 hover:to-indigo-700 transition-all font-medium shadow-lg hover:scale-105"
+                    onClick={() => setIsTaskModalOpen(true)}
+                    className="bg-black hover:bg-gray-800 text-white px-4 py-2 rounded text-sm"
                   >
-                    {editingItem ? 'Update Lead' : 'Add Lead'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={resetLeadForm}
-                    className="flex-1 bg-gray-200 text-gray-700 py-3 rounded-lg hover:bg-gray-300 transition-all font-medium"
-                  >
-                    Cancel
+                    + Add Task
                   </button>
                 </div>
-              </form>
+              </div>
+              
+              <div className="space-y-3">
+                {filteredTasks.map((task, index) => (
+                  <div
+                    key={task.id}
+                    className={`border border-gray-300 rounded p-4 ${
+                      task.completed ? 'bg-gray-50' : 'bg-white'
+                    }`}
+                  >
+                    <div className="flex items-start gap-3">
+                      <input
+                        type="checkbox"
+                        checked={task.completed}
+                        onChange={() => toggleTaskComplete(task)}
+                        className="mt-1 w-5 h-5 text-black rounded border-gray-300 focus:ring-black"
+                      />
+                      <div className="flex-1">
+                        <h4 className={`font-medium ${
+                          task.completed ? 'line-through text-gray-500' : 'text-gray-900'
+                        }`}>
+                          {task.title}
+                        </h4>
+                        {task.description && (
+                          <p className={`text-sm mt-1 ${
+                            task.completed ? 'text-gray-400' : 'text-gray-600'
+                          }`}>
+                            {task.description}
+                          </p>
+                        )}
+                        <p className={`text-sm mt-2 ${
+                          task.completed ? 'text-gray-400' : 'text-gray-600'
+                        }`}>
+                          📅 Due: {new Date(task.due_date).toLocaleDateString()}
+                        </p>
+                      </div>
+                      <button
+                        onClick={() => editTask(task)}
+                        className="text-gray-700 hover:text-black text-sm"
+                      >
+                        Edit
+                      </button>
+                    </div>
+                  </div>
+                ))}
+                {filteredTasks.length === 0 && (
+                  <div className="text-center py-12 text-gray-400">
+                    <p>No tasks found</p>
+                  </div>
+                )}
+              </div>
             </div>
-          </div>
-        )}
+          )}
+        </div>
+      </div>
 
-        {isFollowUpModalOpen && (
-          <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50 backdrop-blur-sm animate-fadeIn">
-            <div className="bg-white rounded-2xl max-w-lg w-full p-6 md:p-8 shadow-2xl animate-scaleIn">
-              <h3 className="text-2xl md:text-3xl font-bold mb-6 text-gray-800">
-                {editingItem ? 'Edit Follow-up' : 'Add Follow-up'}
-              </h3>
-              <form onSubmit={addOrUpdateFollowUp} className="space-y-4">
+      {/* Modals */}
+      {isLeadModalOpen && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-lg max-w-2xl w-full max-h-[90vh] overflow-y-auto p-6">
+            <h3 className="text-xl font-bold mb-4">
+              {editingItem ? 'Edit Lead' : 'Add New Lead'}
+            </h3>
+            <form onSubmit={addOrUpdateLead} className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium mb-2">Full Name *</label>
+                <input
+                  type="text"
+                  required
+                  value={leadForm.full_name}
+                  onChange={(e) => setLeadForm({ ...leadForm, full_name: e.target.value })}
+                  className="w-full px-4 py-2 border border-gray-300 rounded focus:outline-none focus:border-gray-500"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium mb-2">Email *</label>
+                <input
+                  type="email"
+                  required
+                  value={leadForm.email}
+                  onChange={(e) => setLeadForm({ ...leadForm, email: e.target.value })}
+                  className="w-full px-4 py-2 border border-gray-300 rounded focus:outline-none focus:border-gray-500"
+                />
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Lead <span className="text-red-500">*</span>
-                  </label>
+                  <label className="block text-sm font-medium mb-2">Phone</label>
+                  <input
+                    type="tel"
+                    value={leadForm.phone}
+                    onChange={(e) => setLeadForm({ ...leadForm, phone: e.target.value })}
+                    className="w-full px-4 py-2 border border-gray-300 rounded focus:outline-none focus:border-gray-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium mb-2">Company</label>
+                  <input
+                    type="text"
+                    value={leadForm.company}
+                    onChange={(e) => setLeadForm({ ...leadForm, company: e.target.value })}
+                    className="w-full px-4 py-2 border border-gray-300 rounded focus:outline-none focus:border-gray-500"
+                  />
+                </div>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium mb-2">Job Title</label>
+                  <input
+                    type="text"
+                    value={leadForm.job_title}
+                    onChange={(e) => setLeadForm({ ...leadForm, job_title: e.target.value })}
+                    className="w-full px-4 py-2 border border-gray-300 rounded focus:outline-none focus:border-gray-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium mb-2">Location</label>
+                  <input
+                    type="text"
+                    value={leadForm.location}
+                    onChange={(e) => setLeadForm({ ...leadForm, location: e.target.value })}
+                    className="w-full px-4 py-2 border border-gray-300 rounded focus:outline-none focus:border-gray-500"
+                  />
+                </div>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium mb-2">Source</label>
                   <select
-                    required
-                    value={followUpForm.lead_id}
-                    onChange={(e) => setFollowUpForm({ ...followUpForm, lead_id: e.target.value })}
-                    className="w-full px-4 py-3 border-2 border-gray-200 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all"
+                    value={leadForm.source}
+                    onChange={(e) => setLeadForm({ ...leadForm, source: e.target.value })}
+                    className="w-full px-4 py-2 border border-gray-300 rounded focus:outline-none focus:border-gray-500"
                   >
-                    <option value="">Select a lead</option>
-                    {leads.filter(l => l.is_active).map((lead) => (
-                      <option key={lead.id} value={lead.id}>
-                        {lead.full_name} - {lead.email}
-                      </option>
-                    ))}
+                    <option value="Website">Website</option>
+                    <option value="Instagram">Instagram</option>
+                    <option value="Facebook">Facebook</option>
+                    <option value="Cold Call">Cold Call</option>
+                    <option value="Other">Other</option>
                   </select>
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Follow-up Date <span className="text-red-500">*</span>
-                  </label>
-                  <input
-                    type="date"
-                    required
-                    min={getTodayDate()}
-                    value={followUpForm.follow_up_date}
-                    onChange={(e) => setFollowUpForm({ ...followUpForm, follow_up_date: e.target.value })}
-                    className="w-full px-4 py-3 border-2 border-gray-200 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">Remarks</label>
-                  <textarea
-                    value={followUpForm.remarks}
-                    onChange={(e) => setFollowUpForm({ ...followUpForm, remarks: e.target.value })}
-                    rows={3}
-                    className="w-full px-4 py-3 border-2 border-gray-200 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all"
-                    placeholder="e.g., Call Not Pick, Meeting scheduled, etc."
-                  />
-                </div>
-                <div className="flex gap-4 pt-4">
-                  <button
-                    type="submit"
-                    className="flex-1 bg-gradient-to-r from-purple-600 to-pink-600 text-white py-3 rounded-lg hover:from-purple-700 hover:to-pink-700 transition-all font-medium shadow-lg hover:scale-105"
+                  <label className="block text-sm font-medium mb-2">Status</label>
+                  <select
+                    value={leadForm.status}
+                    onChange={(e) => setLeadForm({ ...leadForm, status: e.target.value as any })}
+                    className="w-full px-4 py-2 border border-gray-300 rounded focus:outline-none focus:border-gray-500"
                   >
-                    {editingItem ? 'Update Follow-up' : 'Add Follow-up'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={resetFollowUpForm}
-                    className="flex-1 bg-gray-200 text-gray-700 py-3 rounded-lg hover:bg-gray-300 transition-all font-medium"
-                  >
-                    Cancel
-                  </button>
-                </div>
-              </form>
-            </div>
-          </div>
-        )}
-
-        {isTaskModalOpen && (
-          <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50 backdrop-blur-sm animate-fadeIn">
-            <div className="bg-white rounded-2xl max-w-lg w-full p-6 md:p-8 shadow-2xl animate-scaleIn">
-              <h3 className="text-2xl md:text-3xl font-bold mb-6 text-gray-800">
-                {editingItem ? 'Edit Task' : 'Add New Task'}
-              </h3>
-              <form onSubmit={addOrUpdateTask} className="space-y-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Title <span className="text-red-500">*</span>
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    value={taskForm.title}
-                    onChange={(e) => setTaskForm({ ...taskForm, title: e.target.value })}
-                    className="w-full px-4 py-3 border-2 border-gray-200 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent transition-all"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">Description</label>
-                  <textarea
-                    value={taskForm.description}
-                    onChange={(e) => setTaskForm({ ...taskForm, description: e.target.value })}
-                    rows={3}
-                    className="w-full px-4 py-3 border-2 border-gray-200 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent transition-all"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Due Date <span className="text-red-500">*</span>
-                  </label>
-                  <input
-                    type="date"
-                    required
-                    min={getTodayDate()}
-                    value={taskForm.due_date}
-                    onChange={(e) => setTaskForm({ ...taskForm, due_date: e.target.value })}
-                    className="w-full px-4 py-3 border-2 border-gray-200 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent transition-all"
-                  />
-                </div>
-                <div className="flex gap-4 pt-4">
-                  <button
-                    type="submit"
-                    className="flex-1 bg-gradient-to-r from-orange-600 to-red-600 text-white py-3 rounded-lg hover:from-orange-700 hover:to-red-700 transition-all font-medium shadow-lg hover:scale-105"
-                  >
-                    {editingItem ? 'Update Task' : 'Add Task'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={resetTaskForm}
-                    className="flex-1 bg-gray-200 text-gray-700 py-3 rounded-lg hover:bg-gray-300 transition-all font-medium"
-                  >
-                    Cancel
-                  </button>
-                </div>
-              </form>
-            </div>
-          </div>
-        )}
-
-        {isHistoryModalOpen && (
-          <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50 backdrop-blur-sm animate-fadeIn">
-            <div className="bg-white rounded-2xl max-w-4xl w-full max-h-[90vh] overflow-y-auto p-6 md:p-8 shadow-2xl animate-scaleIn">
-              <div className="flex justify-between items-center mb-6">
-                <h3 className="text-2xl md:text-3xl font-bold text-gray-800">
-                  Follow-up History - {selectedLead?.full_name}
-                </h3>
-                <button
-                  onClick={() => setIsHistoryModalOpen(false)}
-                  className="text-gray-400 hover:text-gray-600 text-3xl"
-                >
-                  ×
-                </button>
-              </div>
-
-              <div className="bg-gradient-to-r from-indigo-50 to-purple-50 rounded-xl p-4 mb-6">
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div>
-                    <p className="text-sm text-gray-700 mb-2">
-                      <span className="font-semibold">Lead:</span> {selectedLead?.full_name}
-                    </p>
-                    <p className="text-sm text-gray-700 mb-2">
-                      <span className="font-semibold">Email:</span> {selectedLead?.email}
-                    </p>
-                    <p className="text-sm text-gray-700 mb-2">
-                      <span className="font-semibold">Phone:</span> {selectedLead?.phone || 'N/A'}
-                    </p>
-                  </div>
-                  <div>
-                    {selectedLead?.company && (
-                      <p className="text-sm text-gray-700 mb-2">
-                        <span className="font-semibold">Company:</span> {selectedLead.company}
-                      </p>
-                    )}
-                    <p className="text-sm text-gray-700 mb-2">
-                      <span className="font-semibold">Status:</span> 
-                      <span className={`ml-2 px-3 py-1 rounded-full text-xs font-bold ${
-                        selectedLead?.status === 'new' ? 'bg-blue-500 text-white' :
-                        selectedLead?.status === 'open' ? 'bg-green-500 text-white' :
-                        'bg-orange-500 text-white'
-                      }`}>
-                        {formatStatusDisplay(selectedLead?.status || '')}
-                      </span>
-                    </p>
-                    <p className="text-sm text-gray-700 mb-2">
-                      <span className="font-semibold">Active Status:</span>
-                      <span className={`ml-2 px-3 py-1 rounded-full text-xs font-bold ${
-                        selectedLead?.is_active
-                          ? 'bg-green-500 text-white'
-                          : 'bg-red-500 text-white'
-                      }`}>
-                        {selectedLead?.is_active ? 'Active' : 'Inactive'}
-                      </span>
-                    </p>
-                  </div>
+                    <option value="new">New</option>
+                    <option value="open">Open</option>
+                    <option value="important">Important</option>
+                  </select>
                 </div>
               </div>
-
-              {followUpHistory.length === 0 ? (
-                <div className="text-center py-12 text-gray-400">
-                  <div className="text-6xl mb-4">📭</div>
-                  <p className="text-xl">No follow-up history</p>
-                </div>
-              ) : (
-                <div className="overflow-x-auto rounded-xl border-2 border-gray-100 mb-6">
-                  <table className="w-full">
-                    <thead className="bg-gradient-to-r from-indigo-600 to-purple-600 text-white">
-                      <tr>
-                        <th className="px-4 py-3 text-left text-sm font-semibold">Date Added</th>
-                        <th className="px-4 py-3 text-left text-sm font-semibold">Scheduled For</th>
-                        <th className="px-4 py-3 text-left text-sm font-semibold">Remarks</th>
-                        <th className="px-4 py-3 text-left text-sm font-semibold">Status</th>
-                        <th className="px-4 py-3 text-left text-sm font-semibold">Completed Date</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-gray-100">
-                      {followUpHistory.map((history, index) => (
-                        <tr
-                          key={history.id}
-                          className={`hover:bg-gray-50 transition-all animate-fadeIn ${
-                            history.completed ? 'bg-green-50' : 
-                            new Date(history.follow_up_date) < new Date() ? 'bg-red-50' : 
-                            'bg-yellow-50'
-                          }`}
-                          style={{ animationDelay: `${index * 0.05}s` }}
-                        >
-                          <td className="px-4 py-3 text-sm text-gray-700">
-                            {new Date(history.created_at).toLocaleDateString()}
-                          </td>
-                          <td className="px-4 py-3 text-sm text-gray-700">
-                            {new Date(history.follow_up_date).toLocaleDateString()}
-                            {new Date(history.follow_up_date) < new Date() && !history.completed && (
-                              <span className="ml-2 bg-red-100 text-red-800 px-2 py-1 rounded text-xs font-bold">
-                                Past Due
-                              </span>
-                            )}
-                          </td>
-                          <td className="px-4 py-3 text-sm text-gray-700">
-                            {history.remarks || '-'}
-                          </td>
-                          <td className="px-4 py-3">
-                            <span
-                              className={`px-3 py-1 rounded-full text-xs font-bold ${
-                                history.completed
-                                  ? 'bg-green-500 text-white'
-                                  : new Date(history.follow_up_date) < new Date()
-                                  ? 'bg-red-500 text-white'
-                                  : 'bg-yellow-500 text-white'
-                              }`}
-                            >
-                              {history.completed ? 'Completed' : 
-                               new Date(history.follow_up_date) < new Date() ? 'Past Due' : 'Pending'}
-                            </span>
-                          </td>
-                          <td className="px-4 py-3 text-sm text-gray-700">
-                            {history.completed_at
-                              ? new Date(history.completed_at).toLocaleDateString()
-                              : '-'}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-              <div className="flex flex-col md:flex-row gap-4">
-                <button
-                  onClick={saveHistoryAsPDF}
-                  className="flex-1 bg-gradient-to-r from-red-600 to-pink-600 text-white py-3 rounded-lg hover:from-red-700 hover:to-pink-700 transition-all font-medium shadow-lg hover:scale-105 flex items-center justify-center gap-2"
-                >
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
-                  </svg>
-                  Save as PDF
-                </button>
-                <button
-                  onClick={() => setIsHistoryModalOpen(false)}
-                  className="flex-1 bg-gray-200 text-gray-700 py-3 rounded-lg hover:bg-gray-300 transition-all font-medium"
-                >
-                  Close
-                </button>
+              <div>
+                <label className="block text-sm font-medium mb-2">Industry</label>
+                <input
+                  type="text"
+                  value={leadForm.industry}
+                  onChange={(e) => setLeadForm({ ...leadForm, industry: e.target.value })}
+                  className="w-full px-4 py-2 border border-gray-300 rounded focus:outline-none focus:border-gray-500"
+                />
               </div>
-            </div>
-          </div>
-        )}
-
-        {isImportModalOpen && (
-          <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50 backdrop-blur-sm animate-fadeIn">
-            <div className="bg-white rounded-2xl max-w-lg w-full p-6 md:p-8 shadow-2xl animate-scaleIn">
-              <h3 className="text-2xl md:text-3xl font-bold mb-6 text-gray-800">Import Leads</h3>
-              <div className="space-y-4">
-                <div className="border-2 border-dashed border-gray-300 rounded-xl p-8 text-center hover:border-blue-500 transition-all">
-                  <div className="text-6xl mb-4">📁</div>
-                  <p className="text-gray-700 mb-4 font-medium">
-                    Upload CSV or Excel file with leads data
-                  </p>
-                  <p className="text-sm text-gray-500 mb-4">
-                    Format: Full Name, Email, Phone, Company, Job Title, Location, Source, Status, Industry
-                  </p>
-                  <input
-                    type="file"
-                    accept=".csv,.xlsx,.xls"
-                    onChange={handleFileImport}
-                    className="hidden"
-                    id="file-upload"
-                  />
-                  <label
-                    htmlFor="file-upload"
-                    className="inline-block bg-gradient-to-r from-blue-600 to-indigo-600 text-white px-6 py-3 rounded-lg cursor-pointer hover:from-blue-700 hover:to-indigo-700 transition-all font-medium shadow-lg hover:scale-105"
-                  >
-                    Choose File
-                  </label>
-                </div>
+              <div className="flex gap-4 pt-4">
                 <button
-                  onClick={() => setIsImportModalOpen(false)}
-                  className="w-full bg-gray-200 text-gray-700 py-3 rounded-lg hover:bg-gray-300 transition-all font-medium"
+                  type="submit"
+                  className="flex-1 bg-black hover:bg-gray-800 text-white py-2 rounded font-medium"
+                >
+                  {editingItem ? 'Update Lead' : 'Add Lead'}
+                </button>
+                <button
+                  type="button"
+                  onClick={resetLeadForm}
+                  className="flex-1 border border-gray-300 text-gray-700 py-2 rounded hover:bg-gray-100"
                 >
                   Cancel
                 </button>
               </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {isFollowUpModalOpen && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-lg max-w-lg w-full p-6">
+            <h3 className="text-xl font-bold mb-4">
+              Add Follow-up
+            </h3>
+            <form onSubmit={addOrUpdateFollowUp} className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium mb-2">Lead *</label>
+                <select
+                  required
+                  value={followUpForm.lead_id}
+                  onChange={(e) => {
+                    const selectedLead = leads.find(l => l.id === e.target.value);
+                    setFollowUpForm({ 
+                      ...followUpForm, 
+                      lead_id: e.target.value,
+                      set_active: selectedLead?.is_active ?? true
+                    });
+                  }}
+                  className="w-full px-4 py-2 border border-gray-300 rounded focus:outline-none focus:border-gray-500"
+                >
+                  <option value="">Select a lead</option>
+                  {leads.filter(l => l.is_active).map((lead) => (
+                    <option key={lead.id} value={lead.id}>
+                      {lead.full_name} - {lead.email}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium mb-2">Follow-up Date *</label>
+                <input
+                  type="date"
+                  required
+                  min={getTodayDate()}
+                  value={followUpForm.follow_up_date}
+                  onChange={(e) => setFollowUpForm({ ...followUpForm, follow_up_date: e.target.value })}
+                  className="w-full px-4 py-2 border border-gray-300 rounded focus:outline-none focus:border-gray-500"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium mb-2">Remarks</label>
+                <textarea
+                  value={followUpForm.remarks}
+                  onChange={(e) => setFollowUpForm({ ...followUpForm, remarks: e.target.value })}
+                  rows={3}
+                  className="w-full px-4 py-2 border border-gray-300 rounded focus:outline-none focus:border-gray-500"
+                  placeholder="e.g., Call Not Pick, Meeting scheduled, etc."
+                />
+              </div>
+              <div className="flex items-center gap-3">
+                <label className="block text-sm font-medium">Lead Active Status:</label>
+                <div className="flex border border-gray-300 rounded overflow-hidden">
+                  <button
+                    type="button"
+                    onClick={() => setFollowUpForm({ ...followUpForm, set_active: true })}
+                    className={`px-4 py-2 text-sm ${
+                      followUpForm.set_active 
+                        ? 'bg-black text-white' 
+                        : 'bg-white text-gray-700 hover:bg-gray-100'
+                    }`}
+                  >
+                    Active
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setFollowUpForm({ ...followUpForm, set_active: false })}
+                    className={`px-4 py-2 text-sm ${
+                      !followUpForm.set_active 
+                        ? 'bg-black text-white' 
+                        : 'bg-white text-gray-700 hover:bg-gray-100'
+                    }`}
+                  >
+                    Inactive
+                  </button>
+                </div>
+              </div>
+              <div className="flex gap-4 pt-4">
+                <button
+                  type="submit"
+                  className="flex-1 bg-black hover:bg-gray-800 text-white py-2 rounded font-medium"
+                >
+                  Schedule Follow-up
+                </button>
+                <button
+                  type="button"
+                  onClick={resetFollowUpForm}
+                  className="flex-1 border border-gray-300 text-gray-700 py-2 rounded hover:bg-gray-100"
+                >
+                  Cancel
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {isTaskModalOpen && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-lg max-w-lg w-full p-6">
+            <h3 className="text-xl font-bold mb-4">
+              {editingItem ? 'Edit Task' : 'Add New Task'}
+            </h3>
+            <form onSubmit={addOrUpdateTask} className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium mb-2">Title *</label>
+                <input
+                  type="text"
+                  required
+                  value={taskForm.title}
+                  onChange={(e) => setTaskForm({ ...taskForm, title: e.target.value })}
+                  className="w-full px-4 py-2 border border-gray-300 rounded focus:outline-none focus:border-gray-500"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium mb-2">Description</label>
+                <textarea
+                  value={taskForm.description}
+                  onChange={(e) => setTaskForm({ ...taskForm, description: e.target.value })}
+                  rows={3}
+                  className="w-full px-4 py-2 border border-gray-300 rounded focus:outline-none focus:border-gray-500"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium mb-2">Due Date *</label>
+                <input
+                  type="date"
+                  required
+                  min={getTodayDate()}
+                  value={taskForm.due_date}
+                  onChange={(e) => setTaskForm({ ...taskForm, due_date: e.target.value })}
+                  className="w-full px-4 py-2 border border-gray-300 rounded focus:outline-none focus:border-gray-500"
+                />
+              </div>
+              <div className="flex gap-4 pt-4">
+                <button
+                  type="submit"
+                  className="flex-1 bg-black hover:bg-gray-800 text-white py-2 rounded font-medium"
+                >
+                  {editingItem ? 'Update Task' : 'Add Task'}
+                </button>
+                <button
+                  type="button"
+                  onClick={resetTaskForm}
+                  className="flex-1 border border-gray-300 text-gray-700 py-2 rounded hover:bg-gray-100"
+                >
+                  Cancel
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {isHistoryModalOpen && selectedLead && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-lg max-w-4xl w-full max-h-[90vh] overflow-y-auto p-6">
+            <div className="flex justify-between items-center mb-6">
+              <h3 className="text-xl font-bold">Follow-up History - {selectedLead.full_name}</h3>
+              <button
+                onClick={() => setIsHistoryModalOpen(false)}
+                className="text-gray-400 hover:text-gray-600"
+              >
+                ×
+              </button>
+            </div>
+
+            <div className="mb-6">
+              <p className="text-sm text-gray-700 mb-2">
+                <span className="font-medium">Lead:</span> {selectedLead.full_name}
+              </p>
+              <p className="text-sm text-gray-700 mb-2">
+                <span className="font-medium">Email:</span> {selectedLead.email}
+              </p>
+              <p className="text-sm text-gray-700 mb-2">
+                <span className="font-medium">Phone:</span> {selectedLead.phone || 'N/A'}
+              </p>
+              <p className="text-sm text-gray-700">
+                <span className="font-medium">Status:</span> {formatStatusDisplay(selectedLead.status)}
+              </p>
+            </div>
+
+            <div className="border border-gray-300 rounded overflow-hidden">
+              <table className="w-full">
+                <thead className="bg-gray-100">
+                  <tr>
+                    <th className="px-4 py-3 text-left text-sm font-semibold border-r border-gray-300">Date Added</th>
+                    <th className="px-4 py-3 text-left text-sm font-semibold border-r border-gray-300">Scheduled For</th>
+                    <th className="px-4 py-3 text-left text-sm font-semibold border-r border-gray-300">Remarks</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-300">
+                  {followUpHistory.map((history) => (
+                    <tr key={history.id} className="hover:bg-gray-50">
+                      <td className="px-4 py-3 text-sm border-r border-gray-300">
+                        {new Date(history.created_at).toLocaleDateString()}
+                      </td>
+                      <td className="px-4 py-3 text-sm border-r border-gray-300">
+                        {new Date(history.follow_up_date).toLocaleDateString()}
+                      </td>
+                      <td className="px-4 py-3 text-sm border-r border-gray-300">
+                        {history.remarks || '-'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="flex gap-4 mt-6">
+              <button
+                onClick={saveHistoryAsPDF}
+                className="flex-1 bg-black hover:bg-gray-800 text-white py-2 rounded"
+              >
+                Save as PDF
+              </button>
+              <button
+                onClick={() => setIsHistoryModalOpen(false)}
+                className="flex-1 border border-gray-300 text-gray-700 py-2 rounded hover:bg-gray-100"
+              >
+                Close
+              </button>
             </div>
           </div>
-        )}
-      </div>
-
-                  <style jsx>{`
-        @keyframes fadeIn {
-          from {
-            opacity: 0;
-          }
-          to {
-            opacity: 1;
-          }
-        }
-
-        @keyframes slideUp {
-          from {
-            opacity: 0;
-            transform: translateY(20px);
-          }
-          to {
-            opacity: 1;
-            transform: translateY(0);
-          }
-        }
-
-        @keyframes slideDown {
-          from {
-            opacity: 0;
-            transform: translateY(-20px);
-          }
-          to {
-            opacity: 1;
-            transform: translateY(0);
-            }
-            }
-
-        @keyframes scaleIn {
-          from {
-            opacity: 0;
-            transform: scale(0.95);
-          }
-          to {
-            opacity: 1;
-            transform: scale(1);
-            }
-            }
-            
-            .animate-fadeIn {
-              animation: fadeIn 0.3s ease-out;
-        }
-        
-        .animate-slideUp {
-          animation: slideUp 0.4s ease-out;
-        }
-
-        .animate-slideDown {
-          animation: slideDown 0.3s ease-out;
-        }
-
-        .animate-scaleIn {
-          animation: scaleIn 0.3s ease-out;
-        }
-        `}</style>
         </div>
+      )}
+
+      {isFollowUpHistoryModalOpen && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-lg max-w-4xl w-full max-h-[90vh] overflow-y-auto p-6">
+            <div className="flex justify-between items-center mb-6">
+              <h3 className="text-xl font-bold">All Follow-up History</h3>
+              <button
+                onClick={() => setIsFollowUpHistoryModalOpen(false)}
+                className="text-gray-400 hover:text-gray-600"
+              >
+                ×
+              </button>
+            </div>
+
+            <div className="mb-6">
+              <p className="text-sm text-gray-700">
+                <span className="font-medium">Total Follow-ups:</span> {followUpHistory.length}
+              </p>
+            </div>
+
+            <div className="border border-gray-300 rounded overflow-hidden">
+              <table className="w-full">
+                <thead className="bg-gray-100">
+                  <tr>
+                    <th className="px-4 py-3 text-left text-sm font-semibold border-r border-gray-300">Lead Name</th>
+                    <th className="px-4 py-3 text-left text-sm font-semibold border-r border-gray-300">Date Added</th>
+                    <th className="px-4 py-3 text-left text-sm font-semibold border-r border-gray-300">Scheduled For</th>
+                    <th className="px-4 py-3 text-left text-sm font-semibold border-r border-gray-300">Remarks</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-300">
+                  {followUpHistory.map((history) => (
+                    <tr key={history.id} className="hover:bg-gray-50">
+                      <td className="px-4 py-3 text-sm border-r border-gray-300">
+                        {history.leads?.full_name || 'Unknown Lead'}
+                      </td>
+                      <td className="px-4 py-3 text-sm border-r border-gray-300">
+                        {new Date(history.created_at).toLocaleDateString()}
+                      </td>
+                      <td className="px-4 py-3 text-sm border-r border-gray-300">
+                        {new Date(history.follow_up_date).toLocaleDateString()}
+                      </td>
+                      <td className="px-4 py-3 text-sm border-r border-gray-300">
+                        {history.remarks || '-'}
+                      </td>    
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="flex gap-4 mt-6">
+              <button
+                onClick={saveHistoryAsPDF}
+                className="flex-1 bg-black hover:bg-gray-800 text-white py-2 rounded"
+              >
+                Save as PDF
+              </button>
+              <button
+                onClick={() => setIsFollowUpHistoryModalOpen(false)}
+                className="flex-1 border border-gray-300 text-gray-700 py-2 rounded hover:bg-gray-100"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isImportModalOpen && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-lg max-w-lg w-full p-6">
+            <h3 className="text-xl font-bold mb-4">Import Leads</h3>
+            <div className="space-y-4">
+              <div className="border border-dashed border-gray-300 rounded p-8 text-center">
+                <p className="text-gray-700 mb-4">Upload CSV or Excel file</p>
+                <input
+                  type="file"
+                  accept=".csv,.xlsx,.xls"
+                  onChange={handleFileImport}
+                  className="hidden"
+                  id="file-upload"
+                />
+                <label
+                  htmlFor="file-upload"
+                  className="inline-block bg-black hover:bg-gray-800 text-white px-6 py-2 rounded cursor-pointer"
+                >
+                  Choose File
+                </label>
+              </div>
+              <button
+                onClick={() => setIsImportModalOpen(false)}
+                className="w-full border border-gray-300 text-gray-700 py-2 rounded hover:bg-gray-100"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
