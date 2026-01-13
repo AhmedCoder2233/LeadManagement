@@ -99,6 +99,7 @@ export default function LeadManagement() {
   const [followUpFilter, setFollowUpFilter] = useState<'all' | 'today'>('all');
   const [taskFilter, setTaskFilter] = useState<'all' | 'today'>('all');
   const [selectedLeadForFollowUp, setSelectedLeadForFollowUp] = useState<string>('');
+  const [isProcessing, setIsProcessing] = useState(false);
 
   const [leadForm, setLeadForm] = useState({
     full_name: '',
@@ -125,13 +126,10 @@ export default function LeadManagement() {
     due_date: ''
   });
 
-  const fetchAllData = useCallback(async () => {
-    if (!user) return;
-    
-    await fetchLeads();
-    await fetchAllFollowUps();
-    await fetchTasks();
-  }, [user]);
+  // Optimistically update state immediately, then sync with database
+  const showToast = (message: string, type: 'success' | 'error' | 'info') => {
+    setToast({ message, type });
+  };
 
   useEffect(() => {
     initializeAuth();
@@ -149,7 +147,7 @@ export default function LeadManagement() {
       fetchAllData();
       setupRealtimeSubscriptions();
     }
-  }, [user, fetchAllData]);
+  }, [user]);
 
   const initializeAuth = async () => {
     try {
@@ -237,9 +235,9 @@ export default function LeadManagement() {
           table: 'leads',
           filter: `user_id=eq.${user.id}`
         },
-        (payload) => {
+        async (payload) => {
           console.log('Lead change detected:', payload);
-          fetchAllData();
+          await fetchLeads();
         }
       )
       .subscribe();
@@ -254,9 +252,9 @@ export default function LeadManagement() {
           table: 'follow_ups',
           filter: `user_id=eq.${user.id}`
         },
-        (payload) => {
+        async (payload) => {
           console.log('Follow-up change detected:', payload);
-          fetchAllData();
+          await fetchAllFollowUps();
         }
       )
       .subscribe();
@@ -271,9 +269,9 @@ export default function LeadManagement() {
           table: 'tasks',
           filter: `user_id=eq.${user.id}`
         },
-        (payload) => {
+        async (payload) => {
           console.log('Task change detected:', payload);
-          fetchAllData();
+          await fetchTasks();
         }
       )
       .subscribe();
@@ -311,8 +309,14 @@ export default function LeadManagement() {
     }
   };
 
-  const showToast = (message: string, type: 'success' | 'error' | 'info') => {
-    setToast({ message, type });
+  const fetchAllData = async () => {
+    if (!user) return;
+    
+    await Promise.all([
+      fetchLeads(),
+      fetchAllFollowUps(),
+      fetchTasks()
+    ]);
   };
 
   const fetchLeads = async () => {
@@ -351,12 +355,11 @@ export default function LeadManagement() {
     if (!user) return;
 
     try {
-    const { data: followUpsData, error: followUpsError } = await supabase
-      .from('follow_ups')
-      .select('*, leads(full_name, email, is_active, status)')
-      .eq('user_id', user.id)
-      .order('follow_up_date', { ascending: true });
-
+      const { data: followUpsData, error: followUpsError } = await supabase
+        .from('follow_ups')
+        .select('*, leads(full_name, email, is_active, status)')
+        .eq('user_id', user.id)
+        .order('follow_up_date', { ascending: true });
 
       if (followUpsError) {
         console.error('Follow-ups fetch error:', followUpsError);
@@ -423,10 +426,54 @@ export default function LeadManagement() {
       return;
     }
     
-    if (editingItem) {
-      const { error } = await supabase
-        .from('leads')
-        .update({ 
+    if (isProcessing) return;
+    setIsProcessing(true);
+
+    try {
+      if (editingItem) {
+        // Optimistically update the lead in state
+        const updatedLeads = leads.map(lead => 
+          lead.id === editingItem.id 
+            ? { 
+                ...lead, 
+                ...leadForm,
+                updated_at: new Date().toISOString()
+              }
+            : lead
+        );
+        setLeads(updatedLeads);
+        
+        // Then update in database
+        const { error } = await supabase
+          .from('leads')
+          .update({ 
+            full_name: leadForm.full_name,
+            email: leadForm.email,
+            phone: leadForm.phone,
+            company: leadForm.company,
+            job_title: leadForm.job_title,
+            location: leadForm.location,
+            source: leadForm.source,
+            status: leadForm.status,
+            industry: leadForm.industry,
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', editingItem.id)
+          .eq('user_id', user.id);
+        
+        if (!error) {
+          showToast('Lead updated successfully!', 'success');
+        } else {
+          // Revert on error
+          await fetchLeads();
+          console.error('Update lead error:', error);
+          showToast(`Failed to update lead: ${error.message}`, 'error');
+        }
+      } else {
+        // Create temporary ID for optimistic update
+        const tempId = `temp-${Date.now()}`;
+        const newLead = {
+          id: tempId,
           full_name: leadForm.full_name,
           email: leadForm.email,
           phone: leadForm.phone,
@@ -435,49 +482,49 @@ export default function LeadManagement() {
           location: leadForm.location,
           source: leadForm.source,
           status: leadForm.status,
+          is_active: true,
           industry: leadForm.industry,
+          user_id: user.id,
+          created_at: new Date().toISOString(),
           updated_at: new Date().toISOString()
-        })
-        .eq('id', editingItem.id)
-        .eq('user_id', user.id);
-      
-      if (!error) {
-        showToast('Lead updated successfully!', 'success');
-        resetLeadForm();
-        fetchAllData();
-      } else {
-        console.error('Update lead error:', error);
-        showToast(`Failed to update lead: ${error.message}`, 'error');
+        };
+        
+        // Optimistically add to state
+        setLeads(prev => [newLead, ...prev]);
+        
+        // Then insert into database
+        const { data, error } = await supabase
+          .from('leads')
+          .insert([{
+            full_name: leadForm.full_name,
+            email: leadForm.email,
+            phone: leadForm.phone,
+            company: leadForm.company,
+            job_title: leadForm.job_title,
+            location: leadForm.location,
+            source: leadForm.source,
+            status: leadForm.status,
+            is_active: true,
+            industry: leadForm.industry,
+            user_id: user.id,
+            created_at: new Date().toISOString()
+          }])
+          .select();
+        
+        if (!error) {
+          showToast('Lead added successfully!', 'success');
+          // Real-time subscription will update with correct ID
+        } else {
+          // Revert on error
+          setLeads(prev => prev.filter(lead => lead.id !== tempId));
+          console.error('Insert lead error:', error);
+          showToast(`Failed to add lead: ${error.message}`, 'error');
+        }
       }
-    } else {
-      const leadData = {
-        full_name: leadForm.full_name,
-        email: leadForm.email,
-        phone: leadForm.phone,
-        company: leadForm.company,
-        job_title: leadForm.job_title,
-        location: leadForm.location,
-        source: leadForm.source,
-        status: leadForm.status,
-        is_active: true,
-        industry: leadForm.industry,
-        user_id: user.id,
-        created_at: new Date().toISOString()
-      };
       
-      const { data, error } = await supabase
-        .from('leads')
-        .insert([leadData])
-        .select();
-      
-      if (!error) {
-        resetLeadForm();
-        showToast('Lead added successfully!', 'success');
-        fetchAllData();
-      } else {
-        console.error('Insert lead error:', error);
-        showToast(`Failed to add lead: ${error.message}`, 'error');
-      }
+      resetLeadForm();
+    } finally {
+      setIsProcessing(false);
     }
   };
 
@@ -489,26 +536,85 @@ export default function LeadManagement() {
       return;
     }
     
-    const today = new Date(getTodayDate());
-    const selectedDate = new Date(followUpForm.follow_up_date);
-    
-    if (selectedDate < today) {
-      showToast('Follow-up date cannot be in the past!', 'error');
-      return;
-    }
-    
-    // First, check if there's an existing follow-up for this lead
-    const { data: existingFollowUps } = await supabase
-      .from('follow_ups')
-      .select('*')
-      .eq('lead_id', followUpForm.lead_id)
-      .eq('completed', false)
-      .eq('user_id', user.id);
-    
+    if (isProcessing) return;
+    setIsProcessing(true);
+
     try {
-      // Mark existing follow-ups as completed
-      if (existingFollowUps && existingFollowUps.length > 0) {
-        for (const existingFollowUp of existingFollowUps) {
+      const today = new Date(getTodayDate());
+      const selectedDate = new Date(followUpForm.follow_up_date);
+      
+      if (selectedDate < today) {
+        showToast('Follow-up date cannot be in the past!', 'error');
+        return;
+      }
+      
+      // Get the lead for optimistic update
+      const lead = leads.find(l => l.id === followUpForm.lead_id);
+      if (!lead) {
+        showToast('Lead not found', 'error');
+        return;
+      }
+      
+      // Find existing incomplete follow-ups for this lead
+      const existingIncompleteFollowUps = followUps.filter(f => 
+        f.lead_id === followUpForm.lead_id && !f.completed
+      );
+      
+      // Optimistically mark existing incomplete follow-ups as completed
+      if (existingIncompleteFollowUps.length > 0) {
+        // Update local state for follow-ups
+        setFollowUps(prev => prev.filter(f => 
+          !(f.lead_id === followUpForm.lead_id && !f.completed)
+        ));
+        
+        // Update allFollowUps to mark them as completed
+        setAllFollowUps(prev => prev.map(f => 
+          (f.lead_id === followUpForm.lead_id && !f.completed) 
+            ? { 
+                ...f, 
+                completed: true, 
+                completed_at: new Date().toISOString() 
+              }
+            : f
+        ));
+      }
+      
+      // Optimistically add new follow-up
+      const tempId = `temp-followup-${Date.now()}`;
+      const newFollowUp: FollowUp = {
+        id: tempId,
+        lead_id: followUpForm.lead_id,
+        follow_up_date: followUpForm.follow_up_date,
+        remarks: followUpForm.remarks,
+        completed: false,
+        created_at: new Date().toISOString(),
+        user_id: user.id,
+        leads: {
+          full_name: lead.full_name,
+          email: lead.email,
+          is_active: followUpForm.set_active,
+          status: lead.status
+        }
+      };
+      
+      // Add new follow-up to state immediately
+      const updatedFollowUps = [newFollowUp, ...followUps].sort((a, b) => 
+        new Date(a.follow_up_date).getTime() - new Date(b.follow_up_date).getTime()
+      );
+      setFollowUps(updatedFollowUps);
+      setAllFollowUps(prev => [newFollowUp, ...prev]);
+
+      // Update lead active status optimistically
+      setLeads(prev => prev.map(l => 
+        l.id === lead.id 
+          ? { ...l, is_active: followUpForm.set_active, updated_at: new Date().toISOString() }
+          : l
+      ));
+
+      // Now update database
+      // 1. Mark existing incomplete follow-ups as completed
+      if (existingIncompleteFollowUps.length > 0) {
+        for (const existingFollowUp of existingIncompleteFollowUps) {
           await supabase
             .from('follow_ups')
             .update({ 
@@ -520,16 +626,17 @@ export default function LeadManagement() {
         }
       }
       
-      // Update lead active status
+      // 2. Update lead active status
       await supabase
         .from('leads')
         .update({ 
-          is_active: followUpForm.set_active
+          is_active: followUpForm.set_active,
+          updated_at: new Date().toISOString()
         })
         .eq('id', followUpForm.lead_id)
         .eq('user_id', user.id);
       
-      // Add new follow-up
+      // 3. Add new follow-up
       const { error } = await supabase.from('follow_ups').insert([{
         lead_id: followUpForm.lead_id,
         follow_up_date: followUpForm.follow_up_date,
@@ -540,14 +647,21 @@ export default function LeadManagement() {
       }]);
       
       if (!error) {
-        resetFollowUpForm();
-        showToast('Follow-up scheduled successfully!', 'success');
-        fetchAllData();
+        showToast('Follow-up scheduled successfully! Old follow-ups marked as completed.', 'success');
       } else {
+        // Revert on error
+        await fetchAllFollowUps();
+        await fetchLeads();
         showToast('Failed to schedule follow-up', 'error');
       }
+      
+      resetFollowUpForm();
     } catch (error) {
       showToast('Failed to schedule follow-up', 'error');
+      await fetchAllFollowUps();
+      await fetchLeads();
+    } finally {
+      setIsProcessing(false);
     }
   };
 
@@ -559,43 +673,83 @@ export default function LeadManagement() {
       return;
     }
     
-    if (new Date(taskForm.due_date) < new Date(getTodayDate())) {
-      showToast('Task due date cannot be in the past!', 'error');
-      return;
-    }
-    
-    if (editingItem) {
-      const { error } = await supabase
-        .from('tasks')
-        .update({ ...taskForm, updated_at: new Date().toISOString() })
-        .eq('id', editingItem.id)
-        .eq('user_id', user.id);
-      if (!error) {
-        resetTaskForm();
-        showToast('Task updated successfully!', 'success');
-        fetchAllData();
-      } else {
-        showToast('Failed to update task', 'error');
+    if (isProcessing) return;
+    setIsProcessing(true);
+
+    try {
+      if (new Date(taskForm.due_date) < new Date(getTodayDate())) {
+        showToast('Task due date cannot be in the past!', 'error');
+        return;
       }
-    } else {
-      const { error } = await supabase.from('tasks').insert([{
-        ...taskForm,
-        user_id: user.id,
-        created_at: new Date().toISOString(),
-        completed: false
-      }]);
-      if (!error) {
-        resetTaskForm();
-        showToast('Task created successfully!', 'success');
-        fetchAllData();
+      
+      if (editingItem) {
+        // Optimistically update task in state
+        setTasks(prev => prev.map(task => 
+          task.id === editingItem.id 
+            ? { 
+                ...task, 
+                ...taskForm, 
+                updated_at: new Date().toISOString()
+              }
+            : task
+        ));
+        
+        const { error } = await supabase
+          .from('tasks')
+          .update({ ...taskForm, updated_at: new Date().toISOString() })
+          .eq('id', editingItem.id)
+          .eq('user_id', user.id);
+        
+        if (!error) {
+          showToast('Task updated successfully!', 'success');
+        } else {
+          await fetchTasks();
+          showToast('Failed to update task', 'error');
+        }
       } else {
-        showToast('Failed to create task', 'error');
+        // Optimistically add task to state
+        const tempId = `temp-task-${Date.now()}`;
+        const newTask = {
+          id: tempId,
+          ...taskForm,
+          user_id: user.id,
+          created_at: new Date().toISOString(),
+          completed: false
+        };
+        
+        setTasks(prev => [newTask, ...prev]);
+        
+        const { error } = await supabase.from('tasks').insert([{
+          ...taskForm,
+          user_id: user.id,
+          created_at: new Date().toISOString(),
+          completed: false
+        }]);
+        
+        if (!error) {
+          showToast('Task created successfully!', 'success');
+        } else {
+          setTasks(prev => prev.filter(task => task.id !== tempId));
+          showToast('Failed to create task', 'error');
+        }
       }
+      
+      resetTaskForm();
+    } finally {
+      setIsProcessing(false);
     }
   };
 
   const updateLeadStatus = async (lead: Lead, newStatus: string) => {
     if (!user) return;
+    
+    // Optimistically update state
+    const updatedLeads = leads.map(l => 
+      l.id === lead.id 
+        ? { ...l, status: newStatus.toLowerCase() as any, updated_at: new Date().toISOString() }
+        : l
+    );
+    setLeads(updatedLeads);
     
     const { error } = await supabase
       .from('leads')
@@ -608,14 +762,28 @@ export default function LeadManagement() {
     
     if (!error) {
       showToast(`Lead status changed to ${formatStatusDisplay(newStatus.toLowerCase())}`, 'success');
-      fetchAllData();
     } else {
+      // Revert on error
+      await fetchLeads();
       showToast(`Failed to update lead status: ${error.message}`, 'error');
     }
   };
 
   const updateLeadActiveStatus = async (lead: Lead, isActive: boolean) => {
     if (!user) return;
+    
+    // Optimistically update state
+    const updatedLeads = leads.map(l => 
+      l.id === lead.id 
+        ? { ...l, is_active: isActive, updated_at: new Date().toISOString() }
+        : l
+    );
+    setLeads(updatedLeads);
+    
+    // Also update follow-ups if lead is being deactivated
+    if (!isActive) {
+      setFollowUps(prev => prev.filter(f => f.lead_id !== lead.id));
+    }
     
     const { error } = await supabase
       .from('leads')
@@ -628,8 +796,11 @@ export default function LeadManagement() {
     
     if (!error) {
       showToast(`Lead ${isActive ? 'activated' : 'deactivated'} successfully!`, 'success');
-      fetchAllData();
+      // Refresh follow-ups to reflect changes
+      await fetchAllFollowUps();
     } else {
+      // Revert on error
+      await fetchLeads();
       showToast(`Failed to update lead active status: ${error.message}`, 'error');
     }
   };
@@ -637,21 +808,39 @@ export default function LeadManagement() {
   const toggleTaskComplete = async (task: Task) => {
     if (!user) return;
     
+    // Optimistically update state
+    const updatedTasks = tasks.map(t => 
+      t.id === task.id 
+        ? { ...t, completed: !task.completed }
+        : t
+    );
+    setTasks(updatedTasks);
+    
     const { error } = await supabase
       .from('tasks')
       .update({ completed: !task.completed })
       .eq('id', task.id)
       .eq('user_id', user.id);
+    
     if (!error) {
       showToast(task.completed ? 'Task marked as incomplete' : 'Task completed!', 'success');
-      fetchAllData();
     } else {
+      // Revert on error
+      await fetchTasks();
       showToast('Failed to update task', 'error');
     }
   };
 
   const completeFollowUp = async (followUp: FollowUp) => {
     if (!user) return;
+    
+    // Optimistically update state
+    setFollowUps(prev => prev.filter(f => f.id !== followUp.id));
+    setAllFollowUps(prev => prev.map(f => 
+      f.id === followUp.id 
+        ? { ...f, completed: true, completed_at: new Date().toISOString() }
+        : f
+    ));
     
     const { error } = await supabase
       .from('follow_ups')
@@ -664,8 +853,9 @@ export default function LeadManagement() {
     
     if (!error) {
       showToast('Follow-up marked as completed!', 'success');
-      fetchAllData();
     } else {
+      // Revert on error
+      await fetchAllFollowUps();
       console.error('Complete follow-up error:', error);
       showToast('Failed to complete follow-up', 'error');
     }
@@ -975,244 +1165,226 @@ export default function LeadManagement() {
     showToast('Excel file exported successfully!', 'success');
   };
 
+  const handleFileImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
 
-// Helper function to read file as text
-const readFileAsText = (file: File): Promise<string> => {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = (event) => resolve(event.target?.result as string);
-    reader.onerror = (error) => reject(error);
-    reader.readAsText(file, 'UTF-8');
-  });
-};
+    const isExcel = file.name.endsWith('.xlsx') || file.name.endsWith('.xls');
+    const isCSV = file.name.endsWith('.csv');
+    
+    if (!isExcel && !isCSV) {
+      showToast('Please upload CSV or Excel file only', 'error');
+      return;
+    }
 
-// Parse CSV line with better handling
-const parseCSVLine = (line: string): string[] => {
-  try {
-    // Remove any problematic Unicode characters
-    const cleanLine = line.replace(/[\u0000-\u001F\u007F-\u009F]/g, '');
-    
-    // Try to parse with regex for quoted fields
-    const matches = cleanLine.match(/(".*?"|[^",\t]+)(?=\s*[,|\t]\s*|$)/g);
-    
-    if (matches) {
-      return matches.map(value => {
-        // Remove quotes and trim
-        let cleaned = value.trim();
-        if (cleaned.startsWith('"') && cleaned.endsWith('"')) {
-          cleaned = cleaned.slice(1, -1);
+    try {
+      showToast('Processing import...', 'info');
+      const importedLeads = [];
+      
+      if (isCSV) {
+        const text = await readFileAsText(file);
+        const lines = text.split('\n').filter(line => line.trim() !== '');
+        
+        if (lines.length === 0) {
+          showToast('No data found in CSV file', 'error');
+          return;
         }
-        // Replace escaped quotes
-        cleaned = cleaned.replace(/""/g, '"');
-        // Remove any remaining special characters
-        cleaned = cleaned.replace(/[\u0000-\u001F\u007F-\u009F\\]/g, '');
-        return cleaned;
-      });
-    }
-    
-    // Fallback: split by comma or tab
-    if (line.includes('\t')) {
-      return line.split('\t').map(v => v.trim().replace(/^"|"$/g, ''));
-    }
-    
-    return line.split(',').map(v => v.trim().replace(/^"|"$/g, ''));
-    
-  } catch (error) {
-    // Ultimate fallback
-    return line.split(/\s+/).filter(v => v.trim() !== '');
-  }
-};
 
-// Create lead object from CSV values
-const createLeadFromCSVValues = (values: string[], userId?: string): any => {
-  // Ensure we have enough values, pad with empty strings if needed
-  while (values.length < 10) {
-    values.push('');
-  }
-  
-  return {
-    full_name: values[0] || '',
-    email: values[1] || '',
-    phone: values[2] || '',
-    company: values[3] || '',
-    job_title: values[4] || '',
-    location: values[5] || '',
-    source: values[6] || 'Other',
-    status: ((values[7] || 'new').toLowerCase() as 'new' | 'open' | 'important'),
-    is_active: values[8] ? 
-      (values[8].toLowerCase() === 'active' || values[8].toLowerCase() === 'true') : 
-      true,
-    industry: values[9] || '',
-    user_id: userId || '',
-    created_at: new Date().toISOString()
-  };
-};
-
-// Create lead object from Excel values
-const createLeadFromExcelValues = (values: string[], userId?: string): any => {
-  // Ensure we have enough values
-  while (values.length < 10) {
-    values.push('');
-  }
-  
-  return {
-    full_name: values[0] || '',
-    email: values[1] || '',
-    phone: values[2] || '',
-    company: values[3] || '',
-    job_title: values[4] || '',
-    location: values[5] || '',
-    source: values[6] || 'Other',
-    status: ((values[7] || 'new').toLowerCase() as 'new' | 'open' | 'important'),
-    is_active: values[8] ? 
-      (values[8].toLowerCase() === 'active' || values[8].toLowerCase() === 'true') : 
-      true,
-    industry: values[9] || '',
-    user_id: userId || '',
-    created_at: new Date().toISOString()
-  };
-};
-
-// Main import function
-const handleFileImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
-  const file = e.target.files?.[0];
-  if (!file) return;
-
-  // File type check
-  const isExcel = file.name.endsWith('.xlsx') || file.name.endsWith('.xls');
-  const isCSV = file.name.endsWith('.csv');
-  
-  if (!isExcel && !isCSV) {
-    showToast('Please upload CSV or Excel file only', 'error');
-    return;
-  }
-
-  try {
-    showToast('Processing import...', 'info');
-    const importedLeads = [];
-    
-    if (isCSV) {
-      // CSV handling
-      const text = await readFileAsText(file);
-      const lines = text.split('\n').filter(line => line.trim() !== '');
-      
-      if (lines.length === 0) {
-        showToast('No data found in CSV file', 'error');
-        return;
-      }
-
-      // Check if first line contains headers
-      const firstLine = lines[0].toLowerCase();
-      const hasHeaders = firstLine.includes('full_name') || 
-                        firstLine.includes('name') || 
-                        firstLine.includes('email') ||
-                        firstLine.includes('full name');
-      
-      const startIndex = hasHeaders ? 1 : 0;
-
-      for (let i = startIndex; i < lines.length; i++) {
-        const line = lines[i].trim();
-        if (!line) continue;
+        const firstLine = lines[0].toLowerCase();
+        const hasHeaders = firstLine.includes('full_name') || 
+                          firstLine.includes('name') || 
+                          firstLine.includes('email') ||
+                          firstLine.includes('full name');
         
-        const values = parseCSVLine(line);
-        
-        if (values.length >= 2) {
-          const lead = createLeadFromCSVValues(values, user?.id);
+        const startIndex = hasHeaders ? 1 : 0;
+
+        for (let i = startIndex; i < lines.length; i++) {
+          const line = lines[i].trim();
+          if (!line) continue;
           
-          // Validate required fields
-          if (lead.full_name && lead.email) {
-            importedLeads.push(lead);
+          const values = parseCSVLine(line);
+          
+          if (values.length >= 2) {
+            const lead = createLeadFromCSVValues(values, user?.id);
+            
+            if (lead.full_name && lead.email) {
+              importedLeads.push(lead);
+            }
+          }
+        }
+        
+      } else if (isExcel) {
+        const arrayBuffer = await file.arrayBuffer();
+        const workbook = XLSX.read(arrayBuffer, { type: 'array' });
+        
+        const firstSheetName = workbook.SheetNames[0];
+        const worksheet = workbook.Sheets[firstSheetName];
+        
+        const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
+        
+        if (jsonData.length === 0) {
+          showToast('No data found in Excel file', 'error');
+          return;
+        }
+
+        const firstRow = jsonData[0] as any[];
+        const hasHeaders = firstRow && (
+          (firstRow[0] && firstRow[0].toString().toLowerCase().includes('name')) ||
+          (firstRow[1] && firstRow[1].toString().toLowerCase().includes('email'))
+        );
+        
+        const startIndex = hasHeaders ? 1 : 0;
+
+        for (let i = startIndex; i < jsonData.length; i++) {
+          const row = jsonData[i] as any[];
+          if (!row || row.length === 0) continue;
+          
+          const values = row.map(cell => {
+            if (cell === null || cell === undefined) return '';
+            return cell.toString().trim();
+          });
+          
+          if (values.length >= 2 && values[0] && values[1]) {
+            const lead = createLeadFromExcelValues(values, user?.id);
+            
+            if (lead.full_name && lead.email) {
+              importedLeads.push(lead);
+            }
           }
         }
       }
-      
-    } else if (isExcel) {
-      // EXCEL handling using xlsx library
-      const arrayBuffer = await file.arrayBuffer();
-      const workbook = XLSX.read(arrayBuffer, { type: 'array' });
-      
-      // Get first worksheet
-      const firstSheetName = workbook.SheetNames[0];
-      const worksheet = workbook.Sheets[firstSheetName];
-      
-      // Convert to JSON array
-      const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
-      
-      if (jsonData.length === 0) {
-        showToast('No data found in Excel file', 'error');
-        return;
-      }
 
-      // Determine if first row is header
-      const firstRow = jsonData[0] as any[];
-      const hasHeaders = firstRow && (
-        (firstRow[0] && firstRow[0].toString().toLowerCase().includes('name')) ||
-        (firstRow[1] && firstRow[1].toString().toLowerCase().includes('email'))
-      );
-      
-      const startIndex = hasHeaders ? 1 : 0;
-
-      for (let i = startIndex; i < jsonData.length; i++) {
-        const row = jsonData[i] as any[];
-        if (!row || row.length === 0) continue;
+      if (importedLeads.length > 0 && user) {
+        // Optimistically add leads to state
+        const tempLeads = importedLeads.map((lead, index) => ({
+          ...lead,
+          id: `temp-import-${Date.now()}-${index}`
+        }));
+        setLeads(prev => [...tempLeads, ...prev]);
         
-        // Convert row to string values
-        const values = row.map(cell => {
-          if (cell === null || cell === undefined) return '';
-          return cell.toString().trim();
-        });
+        // Insert in batches
+        const batchSize = 50;
+        let importedCount = 0;
+        let errorCount = 0;
         
-        if (values.length >= 2 && values[0] && values[1]) {
-          const lead = createLeadFromExcelValues(values, user?.id);
+        for (let i = 0; i < importedLeads.length; i += batchSize) {
+          const batch = importedLeads.slice(i, i + batchSize);
+          const { error } = await supabase.from('leads').insert(batch);
           
-          if (lead.full_name && lead.email) {
-            importedLeads.push(lead);
+          if (error) {
+            console.error('Import batch error:', error);
+            errorCount++;
+            continue;
           }
-        }
-      }
-    }
-
-    if (importedLeads.length > 0 && user) {
-      // Insert in batches to avoid timeout
-      const batchSize = 50;
-      let importedCount = 0;
-      let errorCount = 0;
-      
-      for (let i = 0; i < importedLeads.length; i += batchSize) {
-        const batch = importedLeads.slice(i, i + batchSize);
-        const { error } = await supabase.from('leads').insert(batch);
-        
-        if (error) {
-          console.error('Import batch error:', error);
-          errorCount++;
-          // Continue with next batch even if one fails
-          continue;
+          
+          importedCount += batch.length;
         }
         
-        importedCount += batch.length;
-      }
-      
-      if (errorCount > 0) {
-        showToast(`Imported ${importedCount} leads with ${errorCount} errors`, 'info');
+        if (errorCount > 0) {
+          showToast(`Imported ${importedCount} leads with ${errorCount} errors`, 'info');
+          // Refresh to get correct data
+          await fetchLeads();
+        } else {
+          showToast(`Successfully imported ${importedCount} leads!`, 'success');
+        }
+        
+        setIsImportModalOpen(false);
+        
+        if (e.target) {
+          e.target.value = '';
+        }
       } else {
-        showToast(`Successfully imported ${importedCount} leads!`, 'success');
+        showToast('No valid leads found in file. Make sure file has at least Name and Email columns.', 'error');
       }
-      
-      setIsImportModalOpen(false);
-      await fetchAllData();
-      
-      // Reset file input
-      if (e.target) {
-        e.target.value = '';
-      }
-    } else {
-      showToast('No valid leads found in file. Make sure file has at least Name and Email columns.', 'error');
+    } catch (error: any) {
+      console.error('Import processing error:', error);
+      showToast(`Failed to process file: ${error.message}`, 'error');
     }
-  } catch (error: any) {
-    console.error('Import processing error:', error);
-    showToast(`Failed to process file: ${error.message}`, 'error');
-  }
-};
+  };
+
+  const readFileAsText = (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = (event) => resolve(event.target?.result as string);
+      reader.onerror = (error) => reject(error);
+      reader.readAsText(file, 'UTF-8');
+    });
+  };
+
+  const parseCSVLine = (line: string): string[] => {
+    try {
+      const cleanLine = line.replace(/[\u0000-\u001F\u007F-\u009F]/g, '');
+      
+      const matches = cleanLine.match(/(".*?"|[^",\t]+)(?=\s*[,|\t]\s*|$)/g);
+      
+      if (matches) {
+        return matches.map(value => {
+          let cleaned = value.trim();
+          if (cleaned.startsWith('"') && cleaned.endsWith('"')) {
+            cleaned = cleaned.slice(1, -1);
+          }
+          cleaned = cleaned.replace(/""/g, '"');
+          cleaned = cleaned.replace(/[\u0000-\u001F\u007F-\u009F\\]/g, '');
+          return cleaned;
+        });
+      }
+      
+      if (line.includes('\t')) {
+        return line.split('\t').map(v => v.trim().replace(/^"|"$/g, ''));
+      }
+      
+      return line.split(',').map(v => v.trim().replace(/^"|"$/g, ''));
+      
+    } catch (error) {
+      return line.split(/\s+/).filter(v => v.trim() !== '');
+    }
+  };
+
+  const createLeadFromCSVValues = (values: string[], userId?: string): any => {
+    while (values.length < 10) {
+      values.push('');
+    }
+    
+    return {
+      full_name: values[0] || '',
+      email: values[1] || '',
+      phone: values[2] || '',
+      company: values[3] || '',
+      job_title: values[4] || '',
+      location: values[5] || '',
+      source: values[6] || 'Other',
+      status: ((values[7] || 'new').toLowerCase() as 'new' | 'open' | 'important'),
+      is_active: values[8] ? 
+        (values[8].toLowerCase() === 'active' || values[8].toLowerCase() === 'true') : 
+        true,
+      industry: values[9] || '',
+      user_id: userId || '',
+      created_at: new Date().toISOString()
+    };
+  };
+
+  const createLeadFromExcelValues = (values: string[], userId?: string): any => {
+    while (values.length < 10) {
+      values.push('');
+    }
+    
+    return {
+      full_name: values[0] || '',
+      email: values[1] || '',
+      phone: values[2] || '',
+      company: values[3] || '',
+      job_title: values[4] || '',
+      location: values[5] || '',
+      source: values[6] || 'Other',
+      status: ((values[7] || 'new').toLowerCase() as 'new' | 'open' | 'important'),
+      is_active: values[8] ? 
+        (values[8].toLowerCase() === 'active' || values[8].toLowerCase() === 'true') : 
+        true,
+      industry: values[9] || '',
+      user_id: userId || '',
+      created_at: new Date().toISOString()
+    };
+  };
 
   // Filter follow-ups when filter changes
   useEffect(() => {
@@ -1224,7 +1396,6 @@ const handleFileImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
         filtered = filtered.filter(f => f.follow_up_date === today);
       }
       
-      // Only show follow-ups for active leads
       filtered = filtered.filter(f => f.leads?.is_active !== false);
       
       setFollowUps(filtered);
@@ -1664,6 +1835,12 @@ const handleFileImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
                       </div>
                       <div className="flex gap-2">
                         <button
+                          onClick={() => completeFollowUp(followUp)}
+                          className="bg-black hover:bg-gray-800 text-white px-3 py-1 rounded text-sm"
+                        >
+                          ✓ Complete
+                        </button>
+                        <button
                           onClick={() => {
                             setSelectedLeadForFollowUp(followUp.lead_id);
                             setFollowUpForm({ 
@@ -1896,7 +2073,8 @@ const handleFileImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
               <div className="flex gap-4 pt-4">
                 <button
                   type="submit"
-                  className="flex-1 bg-black hover:bg-gray-800 text-white py-2 rounded font-medium"
+                  disabled={isProcessing}
+                  className="flex-1 bg-black hover:bg-gray-800 text-white py-2 rounded font-medium disabled:opacity-50"
                 >
                   {editingItem ? 'Update Lead' : 'Add Lead'}
                 </button>
@@ -1994,7 +2172,8 @@ const handleFileImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
               <div className="flex gap-4 pt-4">
                 <button
                   type="submit"
-                  className="flex-1 bg-black hover:bg-gray-800 text-white py-2 rounded font-medium"
+                  disabled={isProcessing}
+                  className="flex-1 bg-black hover:bg-gray-800 text-white py-2 rounded font-medium disabled:opacity-50"
                 >
                   Schedule Follow-up
                 </button>
@@ -2051,7 +2230,8 @@ const handleFileImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
               <div className="flex gap-4 pt-4">
                 <button
                   type="submit"
-                  className="flex-1 bg-black hover:bg-gray-800 text-white py-2 rounded font-medium"
+                  disabled={isProcessing}
+                  className="flex-1 bg-black hover:bg-gray-800 text-white py-2 rounded font-medium disabled:opacity-50"
                 >
                   {editingItem ? 'Update Task' : 'Add Task'}
                 </button>
